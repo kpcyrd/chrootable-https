@@ -1,0 +1,30 @@
+[package]
+name = "chrootable-https"
+version = "0.1.0"
+description = "Sandbox friendly https client"
+authors = ["kpcyrd <git@rxv.cc>"]
+license = "LGPL-3.0"
+repository = "https://github.com/kpcyrd/chrootable-https"
+readme = "README.md"
+
+[badges]
+travis-ci = { repository = "kpcyrd/chrootable-https" }
+
+[dependencies]
+failure = "0.1.1"
+log = "0.4"
+
+trust-dns-resolver = "0.10.0-alpha.1"
+
+hyper = "0.12"
+http = "0.1.5"
+bytes = "0.4"
+hyper-rustls = "0.14"
+rustls = "0.13"
+tokio-core = "0.1.17"
+futures = "0.1"
+ct-logs = "0.4"
+webpki-roots = "0.15"
+
+[dev-dependencies]
+env_logger = "0.5"
