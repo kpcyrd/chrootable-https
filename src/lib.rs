@@ -115,6 +115,14 @@ impl<R: DnsResolver> Client<R> {
     }
 }
 
+impl Client<Resolver> {
+    /// Create a new client with the system resolver from /etc/resolv.conf
+    pub fn with_system_resolver() -> Result<Client<Resolver>> {
+        let resolver = Resolver::from_system()?;
+        Ok(Client::new(resolver))
+    }
+}
+
 pub trait HttpClient {
     fn request(&self, request: Request<hyper::Body>) -> Result<Response>;
 }
@@ -198,6 +206,13 @@ mod tests {
         let resolver = Resolver::cloudflare();
 
         let client = Client::new(resolver);
+        let reply = client.get("https://httpbin.org/anything").expect("request failed");
+        assert_eq!(reply.status, 200);
+    }
+
+    #[test]
+    fn verify_200_https_system_resolver() {
+        let client = Client::with_system_resolver().expect("failed to create client");
         let reply = client.get("https://httpbin.org/anything").expect("request failed");
         assert_eq!(reply.status, 200);
     }
