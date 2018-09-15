@@ -74,11 +74,9 @@ pub trait DnsResolver {
 
 impl DnsResolver for Resolver {
     fn resolve(&self, name: &str) -> Result<Vec<IpAddr>> {
-        let response = match self.resolver.lookup_ip(name) {
-            Ok(response) => Resolver::transform(response),
-            Err(err) => bail!("resolve error: {}", err),
-        };
-        Ok(response)
+        self.resolver.lookup_ip(name)
+            .map(Resolver::transform)
+            .map_err(|err| format_err!("resolve error: {}", err))
     }
 }
 
