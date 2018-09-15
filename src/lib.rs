@@ -83,6 +83,12 @@ impl<R: DnsResolver> Client<R> {
         }
     }
 
+    /// Create a new client with the system resolver from /etc/resolv.conf
+    pub fn with_system_resolver() -> Result<Client<Resolver>> {
+        let resolver = Resolver::from_system()?;
+        Ok(Client::new(resolver))
+    }
+
     /// Pre-populate the dns-cache. This function is usually called internally
     pub fn pre_resolve(&self, uri: &Uri) -> Result<()> {
         let host = match uri.host() {

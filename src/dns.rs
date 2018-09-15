@@ -27,6 +27,14 @@ impl Resolver {
                                   "1.0.0.1:53".parse().unwrap()]).unwrap()
     }
 
+    /// Create a new resolver from /etc/resolv.conf
+    pub fn from_system() -> Result<Resolver> {
+        let resolver = tdr::Resolver::from_system_conf()?;
+        Ok(Resolver {
+            resolver,
+        })
+    }
+
     pub fn with_udp_addr(recursors: &[SocketAddr]) -> Result<Resolver> {
         let mut config = ResolverConfig::new();
 
