@@ -1,4 +1,5 @@
 use errors::Result;
+use failure::Fail;
 use std::time::Duration;
 use std::net::IpAddr;
 use std::fmt;
@@ -7,14 +8,112 @@ use futures::Future;
 use futures::Poll;
 use tokio_core::reactor;
 use trust_dns_resolver as tdr;
+use trust_dns_resolver::error::ResolveErrorKind;
+use trust_dns_resolver::lookup::Lookup;
 use trust_dns_resolver::lookup_ip::LookupIp;
+use trust_dns_proto::rr::rdata;
+use trust_dns_proto::rr::record_data;
+pub use trust_dns_proto::rr::record_type::RecordType;
 use trust_dns_resolver::config::{ResolverConfig,
                                  ResolverOpts,
                                  NameServerConfig,
                                  Protocol};
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
+
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum DnsReply {
+    #[serde(rename = "success")]
+    Success(Vec<RData>),
+    #[serde(rename = "error")]
+    Error(DnsError),
+}
+
+impl From<Lookup> for DnsReply {
+    fn from(lookup: Lookup) -> DnsReply {
+        let mut records = Vec::new();
+        for data in lookup.iter() {
+            records.push(data.into());
+        }
+        DnsReply::Success(records)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum DnsError {
+    #[serde(rename = "NX")]
+    NXDomain,
+}
+
+impl Into<DnsReply> for DnsError {
+    #[inline]
+    fn into(self) -> DnsReply {
+        DnsReply::Error(self)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RData {
+    A(Ipv4Addr),
+    AAAA(Ipv6Addr),
+    CNAME(String),
+    MX((u16, String)),
+    NS(String),
+    PTR(String),
+    SOA(SOA),
+    SRV((String, u16)),
+    TXT(Vec<u8>),
+    Other(String),
+}
+
+impl<'a> From<&'a record_data::RData> for RData {
+    fn from(rdata: &'a record_data::RData) -> RData {
+        use trust_dns_proto::rr::record_data::RData::*;
+        match rdata {
+            A(ip)       => RData::A(ip.clone()),
+            AAAA(ip)    => RData::AAAA(ip.clone()),
+            CNAME(name) => RData::CNAME(name.to_string()),
+            MX(mx)      => RData::MX((mx.preference(), mx.exchange().to_string())),
+            NS(ns)      => RData::NS(ns.to_string()),
+            PTR(ptr)    => RData::PTR(ptr.to_string()),
+            SOA(soa)    => RData::SOA(soa.into()),
+            SRV(srv)    => RData::SRV((srv.target().to_string(), srv.port())),
+            TXT(txt)    => RData::TXT(txt.iter()
+                                        .fold(Vec::new(), |mut a, b| {
+                                            a.extend(b.iter());
+                                            a
+                                        })),
+            _           => RData::Other("unknown".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SOA {
+    mname: String,
+    rname: String,
+    serial: u32,
+    refresh: i32,
+    retry: i32,
+    expire: i32,
+    minimum: u32
+}
+
+impl<'a> From<&'a rdata::soa::SOA> for SOA {
+    fn from(soa: &'a rdata::soa::SOA) -> SOA {
+        SOA {
+            mname: soa.mname().to_string(),
+            rname: soa.rname().to_string(),
+            serial: soa.serial(),
+            refresh: soa.refresh(),
+            retry: soa.retry(),
+            expire: soa.expire(),
+            minimum: soa.minimum(),
+        }
+    }
+}
 
 
 pub struct Resolver {
@@ -78,6 +177,8 @@ impl fmt::Debug for Resolver {
 
 pub trait DnsResolver {
     fn resolve(&self, name: &str) -> Result<Vec<IpAddr>>;
+
+    fn resolve_adv(&self, name: &str, record: RecordType) -> Result<DnsReply>;
 }
 
 impl DnsResolver for Resolver {
@@ -85,6 +186,19 @@ impl DnsResolver for Resolver {
         self.resolver.lookup_ip(name)
             .map(Resolver::transform)
             .map_err(|err| format_err!("resolve error: {}", err))
+    }
+
+    fn resolve_adv(&self, name: &str, record: RecordType) -> Result<DnsReply> {
+        match self.resolver.lookup(name, record) {
+            Ok(reply) => Ok(reply.into()),
+            Err(err) => match err.kind() {
+                ResolveErrorKind::NoRecordsFound {
+                    query: _,
+                    valid_until: _,
+                } => Ok(DnsError::NXDomain.into()),
+                _ => Err(err.context("Failed to resolve").into()),
+            },
+        }
     }
 }
 

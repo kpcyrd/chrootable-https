@@ -24,9 +24,11 @@ extern crate hyper_rustls;
 extern crate webpki_roots;
 extern crate ct_logs;
 extern crate tokio_core;
+extern crate trust_dns_proto;
 extern crate trust_dns_resolver;
 extern crate futures;
 extern crate bytes;
+#[macro_use] extern crate serde_derive;
 #[macro_use] extern crate failure;
 #[macro_use] extern crate log;
 
