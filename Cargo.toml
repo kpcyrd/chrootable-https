@@ -15,6 +15,10 @@ failure = "0.1.1"
 log = "0.4"
 
 trust-dns-resolver = "0.10.0-alpha.1"
+trust-dns-proto = "0.5.0-alpha.1"
+
+serde = "1.0"
+serde_derive = "1.0"
 
 hyper = "0.12"
 http = "0.1.5"
