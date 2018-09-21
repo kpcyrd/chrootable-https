@@ -19,11 +19,11 @@
 #![warn(unused_extern_crates)]
 extern crate hyper;
 extern crate http;
+extern crate tokio;
 extern crate rustls;
 extern crate hyper_rustls;
 extern crate webpki_roots;
 extern crate ct_logs;
-extern crate tokio_core;
 extern crate trust_dns_proto;
 extern crate trust_dns_resolver;
 extern crate futures;
@@ -40,31 +40,35 @@ use hyper::client::connect::HttpConnector;
 use http::Request;
 use bytes::Bytes;
 
-use tokio_core::reactor;
+use tokio::runtime::Runtime;
 use futures::{future, Stream};
 
 use std::net::IpAddr;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use http::Uri;
 
 mod connector;
 pub mod dns;
 use self::connector::Connector;
 pub use dns::{Resolver, DnsResolver};
+mod wait;
+use wait::Waited;
 
 pub mod errors {
     pub use failure::{Error, ResultExt};
     pub type Result<T> = ::std::result::Result<T, Error>;
 }
-pub use errors::Result;
+pub use errors::*;
 
 
 #[derive(Debug)]
 pub struct Client<R: DnsResolver> {
-    client: hyper::Client<HttpsConnector<Connector<HttpConnector>>>,
+    client: Arc<hyper::Client<HttpsConnector<Connector<HttpConnector>>>>,
     resolver: R,
     records: Arc<Mutex<HashMap<String, IpAddr>>>,
+    timeout: Option<Duration>,
 }
 
 impl<R: DnsResolver> Client<R> {
@@ -79,10 +83,16 @@ impl<R: DnsResolver> Client<R> {
             .build::<_, hyper::Body>(https);
 
         Client {
-            client,
+            client: Arc::new(client),
             resolver,
             records,
+            timeout: None,
         }
+    }
+
+    /// Set a timeout, default is no timeout
+    pub fn timeout(&mut self, timeout: Duration) {
+        self.timeout = Some(timeout);
     }
 
     /// Pre-populate the dns-cache. This function is usually called internally
@@ -134,13 +144,25 @@ impl<R: DnsResolver> HttpClient for Client<R> {
         info!("sending request to {:?}", request.uri());
         self.pre_resolve(request.uri())?;
 
-        let mut core = reactor::Core::new()?;
-        let (parts, body) = core.run(self.client.request(request).and_then(|res| {
-            debug!("http response: {:?}", res);
-            let (parts, body) = res.into_parts();
-            let body = body.concat2();
-            (future::ok(parts), body)
-        }))?;
+        let client = self.client.clone();
+        let timeout = self.timeout.clone();
+
+        let mut rt = Runtime::new()?;
+        let fut = future::lazy(move || {
+            let fut = client.request(request).and_then(|res| {
+                debug!("http response: {:?}", res);
+                let (parts, body) = res.into_parts();
+                let body = body.concat2();
+                (future::ok(parts), body)
+            });
+            wait::timeout(fut, timeout)
+        });
+        let result = rt.block_on(fut);
+        let (parts, body) = match result {
+            Ok((parts, body)) => Ok((parts, body)),
+            Err(Waited::TimedOut) => Err(format_err!("http request timed out")),
+            Err(Waited::Err(err)) => Err(Error::from(err)),
+        }?;
 
         let body = body.into_bytes();
         let reply = Response::from((parts, body));
@@ -193,6 +215,7 @@ impl From<(Parts, Bytes)> for Response {
 mod tests {
     use super::*;
     use dns::Resolver;
+    use std::time::{Instant, Duration};
 
     #[test]
     fn verify_200_http() {
@@ -226,5 +249,19 @@ mod tests {
         let client = Client::new(resolver);
         let reply = client.get("https://httpbin.org/redirect-to?url=/anything&status=302").expect("request failed");
         assert_eq!(reply.status, 302);
+    }
+
+    #[test]
+    fn verify_timeout() {
+        let resolver = Resolver::cloudflare();
+
+        let mut client = Client::new(resolver);
+        client.timeout(Duration::from_millis(250));
+
+        let start = Instant::now();
+        let _reply = client.get("http://1.2.3.4").err();
+        let end = Instant::now();
+
+        assert!(end.duration_since(start) < Duration::from_secs(1));
     }
 }

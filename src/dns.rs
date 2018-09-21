@@ -6,7 +6,7 @@ use std::fmt;
 
 use futures::Future;
 use futures::Poll;
-use tokio_core::reactor;
+use tokio::runtime::Runtime;
 use trust_dns_resolver as tdr;
 use trust_dns_resolver::error::ResolveErrorKind;
 use trust_dns_resolver::lookup::Lookup;
@@ -226,9 +226,9 @@ impl AsyncResolver {
         let mut opts = ResolverOpts::default();
         opts.timeout = Duration::from_secs(1);
 
-        let mut core = reactor::Core::new()?;
+        let mut rt = Runtime::new()?;
         let (resolver, worker) = tdr::AsyncResolver::new(config, opts);
-        let worker = core.run(worker);
+        let worker = rt.block_on(worker);
 
         let _worker = match worker {
             Ok(worker) => worker,
