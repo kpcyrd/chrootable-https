@@ -29,11 +29,12 @@ impl<T> Connector<T> {
         };
 
         let ip = match ip {
-            Some(ip) => ip,
+            Some(IpAddr::V4(ip)) => ip.to_string(),
+            Some(IpAddr::V6(ip)) => format!("[{}]", ip),
             None => bail!("host wasn't pre-resolved"),
         };
 
-        dest.set_host(&ip.to_string())?;
+        dest.set_host(&ip)?;
 
         Ok(dest)
     }
