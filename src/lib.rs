@@ -105,6 +105,7 @@ impl<R: DnsResolver> Client<R> {
         let record = self.resolver.resolve(&host)?;
         match record.into_iter().next() {
             Some(record) => {
+                // TODO: make sure we only add the records we want
                 let mut cache = self.records.lock().unwrap();
                 cache.insert(host.to_string(), record);
             },

@@ -3,7 +3,7 @@ use hyper::rt::Future;
 use hyper::client::connect::{self, Connect};
 use hyper::client::connect::HttpConnector;
 use hyper::client::connect::Destination;
-use futures::{Poll};
+use futures::{future, Poll};
 use rustls::ClientConfig;
 use webpki_roots;
 use ct_logs;
@@ -76,7 +76,13 @@ where
 
     fn connect(&self, dest: connect::Destination) -> Self::Future {
         debug!("original destination: {:?}", dest);
-        let dest = self.resolve_dest(dest).expect("resolve failed"); // TODO
+        let dest = match self.resolve_dest(dest) {
+            Ok(dest) => dest,
+            Err(err) => {
+                let err = io::Error::new(io::ErrorKind::Other, err.to_string());
+                return Connecting(Box::new(future::err(err)));
+            },
+        };
         debug!("resolved destination: {:?}", dest);
         let connecting = self.http.connect(dest);
         let fut = Box::new(connecting);
