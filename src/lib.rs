@@ -17,8 +17,8 @@
 //! ```
 
 #![warn(unused_extern_crates)]
-extern crate hyper;
-extern crate http;
+pub extern crate hyper;
+pub extern crate http;
 extern crate tokio;
 extern crate rustls;
 extern crate hyper_rustls;
@@ -32,12 +32,13 @@ extern crate bytes;
 #[macro_use] extern crate failure;
 #[macro_use] extern crate log;
 
-use hyper::Body;
+pub use hyper::Body;
 use http::response::Parts;
+pub use http::header;
 use hyper_rustls::HttpsConnector;
 use hyper::rt::Future;
 use hyper::client::connect::HttpConnector;
-use http::Request;
+pub use http::Request;
 use bytes::Bytes;
 
 use tokio::runtime::Runtime;
@@ -47,7 +48,7 @@ use std::net::IpAddr;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use http::Uri;
+pub use http::Uri;
 
 mod connector;
 pub mod dns;
