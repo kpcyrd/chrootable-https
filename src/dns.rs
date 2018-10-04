@@ -11,6 +11,7 @@ use trust_dns_resolver as tdr;
 use trust_dns_resolver::error::ResolveErrorKind;
 use trust_dns_resolver::lookup::Lookup;
 use trust_dns_resolver::lookup_ip::LookupIp;
+use trust_dns_resolver::system_conf;
 use trust_dns_proto::rr::rdata;
 use trust_dns_proto::rr::record_data;
 pub use trust_dns_proto::rr::record_type::RecordType;
@@ -22,6 +23,23 @@ use trust_dns_resolver::config::{ResolverConfig,
 use std::io;
 use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
 
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DnsConfig {
+    pub ns: Vec<SocketAddr>,
+}
+
+impl DnsConfig {
+    pub fn from_system() -> Result<DnsConfig> {
+        let (conf, _opts) = system_conf::read_system_conf()?;
+        let ns = conf.name_servers().into_iter()
+            .map(|x| x.socket_addr)
+            .collect();
+        Ok(DnsConfig {
+            ns,
+        })
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DnsReply {
@@ -129,6 +147,22 @@ impl Resolver {
     /// Create a new resolver from /etc/resolv.conf
     pub fn from_system() -> Result<Resolver> {
         let resolver = tdr::Resolver::from_system_conf()?;
+        Ok(Resolver {
+            resolver,
+        })
+    }
+
+    pub fn from_config(config: DnsConfig) -> Result<Resolver> {
+        let mut ns = ResolverConfig::default();
+        for socket_addr in config.ns {
+            ns.add_name_server(NameServerConfig {
+                socket_addr,
+                protocol: Protocol::Udp,
+                tls_dns_name: None,
+            });
+        }
+        let opts = ResolverOpts::default();
+        let resolver = tdr::Resolver::new(ns, opts)?;
         Ok(Resolver {
             resolver,
         })
@@ -270,5 +304,30 @@ impl Future for Resolving {
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.0.poll()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    extern crate serde_json;
+
+    use super::*;
+
+    #[test]
+    fn verify_dns_config() {
+        let config = DnsConfig::from_system().expect("DnsConfig::from_system");
+        let json = serde_json::to_string(&config).expect("to json");
+        println!("{:?}", json);
+        let config = serde_json::from_str::<DnsConfig>(&json).expect("to json");
+
+        let resolver = Resolver::from_config(config).expect("Resolver::from_config");
+        resolver.resolve("example.com").expect("resolve failed");
+    }
+
+    #[test]
+    fn verify_dns_config_from_json() {
+        let json = r#"{"ns":["1.1.1.1:53","1.1.1.1:53","1.0.0.1:53","1.0.0.1:53"]}"#;
+        let _config = serde_json::from_str::<DnsConfig>(&json).expect("to json");
     }
 }
