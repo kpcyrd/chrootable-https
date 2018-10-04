@@ -1,6 +1,6 @@
 [package]
 name = "chrootable-https"
-version = "0.3.2"
+version = "0.3.3"
 description = "Sandbox friendly https client"
 authors = ["kpcyrd <git@rxv.cc>"]
 license = "LGPL-3.0"
