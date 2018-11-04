@@ -42,6 +42,7 @@ pub use http::Request;
 use bytes::Bytes;
 
 use tokio::runtime::Runtime;
+use tokio::prelude::FutureExt;
 use futures::{future, Stream};
 
 use std::net::IpAddr;
@@ -54,8 +55,6 @@ mod connector;
 pub mod dns;
 use self::connector::Connector;
 pub use dns::{Resolver, DnsResolver};
-mod wait;
-use wait::Waited;
 
 pub mod errors {
     pub use failure::{Error, ResultExt};
@@ -150,21 +149,18 @@ impl<R: DnsResolver> HttpClient for Client<R> {
         let timeout = self.timeout.clone();
 
         let mut rt = Runtime::new()?;
-        let fut = future::lazy(move || {
-            let fut = client.request(request).and_then(|res| {
+        let fut = client.request(request)
+            .and_then(|res| {
                 debug!("http response: {:?}", res);
                 let (parts, body) = res.into_parts();
                 let body = body.concat2();
                 (future::ok(parts), body)
             });
-            wait::timeout(fut, timeout)
-        });
-        let result = rt.block_on(fut);
-        let (parts, body) = match result {
-            Ok((parts, body)) => Ok((parts, body)),
-            Err(Waited::TimedOut) => Err(format_err!("http request timed out")),
-            Err(Waited::Err(err)) => Err(Error::from(err)),
-        }?;
+
+        let (parts, body) = match timeout {
+            Some(timeout) => rt.block_on(fut.timeout(timeout))?,
+            None => rt.block_on(fut)?,
+        };
 
         let body = body.into_bytes();
         let reply = Response::from((parts, body));
