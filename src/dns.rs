@@ -25,7 +25,7 @@ use trust_dns_proto::DnsMultiplexer;
 use trust_dns_proto::xfer;
 
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum DnsError {
     FormErr,
     ServFail,
@@ -220,7 +220,7 @@ impl DnsResolver for Resolver {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct DnsReply {
     pub answers: Vec<RData>,
     // TODO: this field is deprecated
@@ -354,5 +354,48 @@ mod tests {
     fn verify_dns_config_from_json() {
         let json = r#"{"ns":["1.1.1.1:53","1.0.0.1:53"]}"#;
         let _resolver = serde_json::from_str::<Resolver>(&json).expect("to json");
+    }
+
+    #[test]
+    fn verify_dns_query() {
+        let resolver = Resolver::from_system().expect("DnsConfig::from_system");
+        let x = resolver.resolve("example.com", RecordType::A).expect("resolve failed");
+        println!("{:?}", x);
+        assert!(x.error.is_none());
+    }
+
+    #[test]
+    fn verify_dns_query_timeout() {
+        let resolver = Resolver {
+            ns: vec!["1.2.3.4:53".parse().unwrap()],
+            tcp: false,
+            timeout: Some(Duration::from_millis(100)),
+        };
+        let x = resolver.resolve("example.com", RecordType::A);
+        assert!(x.is_err());
+    }
+
+    #[test]
+    fn verify_dns_query_nx() {
+        let resolver = Resolver::from_system().expect("DnsConfig::from_system");
+        let x = resolver.resolve("nonexistant.example.com", RecordType::A).expect("resolve failed");
+        println!("{:?}", x);
+        assert_eq!(x, DnsReply {
+            answers: Vec::new(),
+            success: Vec::new(),
+            error: Some(DnsError::NXDomain),
+        });
+    }
+
+    #[test]
+    fn verify_dns_query_empty_cname() {
+        let resolver = Resolver::from_system().expect("DnsConfig::from_system");
+        let x = resolver.resolve("example.com", RecordType::CNAME).expect("resolve failed");
+        println!("{:?}", x);
+        assert_eq!(x, DnsReply {
+            answers: Vec::new(),
+            success: Vec::new(),
+            error: None,
+        });
     }
 }
