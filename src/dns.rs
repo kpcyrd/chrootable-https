@@ -1,81 +1,72 @@
-use errors::Result;
-use failure::Fail;
+use errors::*;
+use dns_system_conf;
 use std::time::Duration;
-use std::net::IpAddr;
-use std::fmt;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 
 use futures::Future;
 use futures::Poll;
+use tokio::prelude::FutureExt;
 use tokio::runtime::Runtime;
-use trust_dns_resolver as tdr;
-use trust_dns_resolver::error::ResolveErrorKind;
-use trust_dns_resolver::lookup::Lookup;
-use trust_dns_resolver::lookup_ip::LookupIp;
-use trust_dns_resolver::system_conf;
-use trust_dns_proto::rr::rdata;
-use trust_dns_proto::rr::record_data;
-pub use trust_dns_proto::rr::record_type::RecordType;
-use trust_dns_resolver::config::{ResolverConfig,
-                                 ResolverOpts,
-                                 NameServerConfig,
-                                 Protocol};
+use tokio::net::TcpStream;
+use trust_dns::client::ClientHandle;
+use trust_dns::rr::rdata;
+use trust_dns::rr::record_data;
+pub use trust_dns::rr::record_type::RecordType;
+use trust_dns::client::{Client, ClientConnection, ClientFuture, SyncClient};
+use trust_dns::udp::{UdpClientConnection, UdpClientStream};
+use trust_dns_proto::udp::UdpClientConnect;
+use trust_dns::tcp::{TcpClientConnection, TcpClientStream};
+use trust_dns_proto::tcp::TcpClientConnect;
+use trust_dns::op::{DnsResponse, ResponseCode};
+use trust_dns::rr::{DNSClass, Name};
+use trust_dns::rr::dnssec::Signer;
+use trust_dns_proto::DnsMultiplexer;
+use trust_dns_proto::xfer;
 
-use std::io;
-use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
-
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct DnsConfig {
-    pub ns: Vec<SocketAddr>,
-    #[serde(default)]
-    pub tcp: bool,
-}
-
-impl DnsConfig {
-    pub fn from_system() -> Result<DnsConfig> {
-        let (conf, _opts) = system_conf::read_system_conf()?;
-        let ns = conf.name_servers().into_iter()
-            .map(|x| x.socket_addr)
-            .collect();
-        Ok(DnsConfig {
-            ns,
-            tcp: false,
-        })
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum DnsReply {
-    #[serde(rename = "success")]
-    Success(Vec<RData>),
-    #[serde(rename = "error")]
-    Error(DnsError),
-}
-
-impl From<Lookup> for DnsReply {
-    fn from(lookup: Lookup) -> DnsReply {
-        let mut records = Vec::new();
-        for data in lookup.iter() {
-            records.push(data.into());
-        }
-        DnsReply::Success(records)
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DnsError {
+    FormErr,
+    ServFail,
     #[serde(rename = "NX")]
     NXDomain,
+    Other,
+    Refused,
+    NotAuth,
+    NotZone,
+    DnsSec,
 }
 
-impl Into<DnsReply> for DnsError {
-    #[inline]
-    fn into(self) -> DnsReply {
-        DnsReply::Error(self)
+impl DnsError {
+    fn from_response_code(code: &ResponseCode) -> Option<DnsError> {
+        use trust_dns::op::ResponseCode::*;
+        match code {
+            NoError => None,
+            FormErr => Some(DnsError::FormErr),
+            ServFail => Some(DnsError::ServFail),
+            NXDomain => Some(DnsError::NXDomain),
+            NotImp => Some(DnsError::Other),
+            Refused => Some(DnsError::Refused),
+            YXDomain => Some(DnsError::Other),
+            YXRRSet => Some(DnsError::Other),
+            NXRRSet => Some(DnsError::Other),
+            NotAuth => Some(DnsError::NotAuth),
+            NotZone => Some(DnsError::NotZone),
+            BADVERS => Some(DnsError::DnsSec),
+            BADSIG => Some(DnsError::DnsSec),
+            BADKEY => Some(DnsError::DnsSec),
+            BADTIME => Some(DnsError::DnsSec),
+            BADMODE => Some(DnsError::DnsSec),
+            BADNAME => Some(DnsError::DnsSec),
+            BADALG => Some(DnsError::DnsSec),
+            BADTRUNC => Some(DnsError::DnsSec),
+            BADCOOKIE => Some(DnsError::DnsSec),
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RData {
     A(Ipv4Addr),
     AAAA(Ipv6Addr),
@@ -91,7 +82,7 @@ pub enum RData {
 
 impl<'a> From<&'a record_data::RData> for RData {
     fn from(rdata: &'a record_data::RData) -> RData {
-        use trust_dns_proto::rr::record_data::RData::*;
+        use trust_dns::rr::record_data::RData::*;
         match rdata {
             A(ip)       => RData::A(ip.clone()),
             AAAA(ip)    => RData::AAAA(ip.clone()),
@@ -111,7 +102,7 @@ impl<'a> From<&'a record_data::RData> for RData {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SOA {
     mname: String,
     rname: String,
@@ -136,180 +127,206 @@ impl<'a> From<&'a rdata::soa::SOA> for SOA {
     }
 }
 
+pub trait DnsResolver {
+    fn resolve(&self, name: &str, query_type: RecordType) -> Result<DnsReply>;
+}
 
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Resolver {
-    resolver: tdr::Resolver,
+    pub ns: Vec<SocketAddr>,
+    #[serde(default)]
+    pub tcp: bool,
+    pub timeout: Option<Duration>,
 }
 
 impl Resolver {
     pub fn cloudflare() -> Resolver {
-        Resolver::with_udp_addr(&["1.1.1.1:53".parse().unwrap(),
-                                  "1.0.0.1:53".parse().unwrap()]).unwrap()
+        Resolver {
+            ns: vec![
+                "1.1.1.1:53".parse().unwrap(),
+                "1.0.0.1:53".parse().unwrap(),
+            ],
+            tcp: false,
+            timeout: Some(Duration::from_secs(1)),
+        }
     }
 
     /// Create a new resolver from /etc/resolv.conf
     pub fn from_system() -> Result<Resolver> {
-        let resolver = tdr::Resolver::from_system_conf()?;
+        let ns = dns_system_conf::read_system_conf()?;
         Ok(Resolver {
-            resolver,
+            ns,
+            tcp: false,
+            timeout: Some(Duration::from_secs(1)),
         })
     }
 
-    pub fn from_config(config: DnsConfig) -> Result<Resolver> {
-        let mut ns = ResolverConfig::new();
-        for socket_addr in config.ns {
-            let protocol = if config.tcp {
-                Protocol::Tcp
-            } else {
-                Protocol::Udp
-            };
-
-            ns.add_name_server(NameServerConfig {
-                socket_addr,
-                protocol,
-                tls_dns_name: None,
-            });
-        }
-        let opts = ResolverOpts::default();
-        let resolver = tdr::Resolver::new(ns, opts)?;
-        Ok(Resolver {
-            resolver,
-        })
-    }
-
-    pub fn with_udp_addr(recursors: &[SocketAddr]) -> Result<Resolver> {
-        let mut config = ResolverConfig::new();
-
-        for recursor in recursors {
-            config.add_name_server(NameServerConfig {
-                socket_addr: recursor.to_owned(),
-                protocol: Protocol::Udp,
-                tls_dns_name: None,
-            });
-        }
-
-        let mut opts = ResolverOpts::default();
-        opts.use_hosts_file = false;
-        opts.timeout = Duration::from_secs(1);
-
-        let resolver = tdr::Resolver::new(config, opts)?;
-
-        Ok(Resolver {
-            resolver,
-        })
-    }
-
-    pub fn with_udp(recursors: &[IpAddr]) -> Result<Resolver> {
-        let recursors = recursors.into_iter()
-                            .map(|x| SocketAddr::new(x.to_owned(), 53))
-                            .collect::<Vec<_>>();
-        Resolver::with_udp_addr(&recursors)
-    }
-
-    #[inline]
-    fn transform(lookup: LookupIp) -> Vec<IpAddr> {
-        lookup.iter().collect()
+    pub fn timeout(&mut self, timeout: Option<Duration>) {
+        self.timeout = timeout;
     }
 }
 
-impl fmt::Debug for Resolver {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "Resolver {{ ... }}")
+impl Resolver {
+    fn resolve_with<T: ClientConnection>(&self, conn: T, name: &Name, query_type: RecordType) -> Result<DnsResponse> {
+        let client = SyncClient::new(conn);
+
+        let mut reactor = Runtime::new()?;
+        let (bg, mut client) = client.new_future();
+        let rt = reactor
+            .spawn(bg);
+
+        let fut = client.query(name.clone(), DNSClass::IN, query_type)
+            .map_err(Error::from);
+
+        let response = match self.timeout {
+            Some(timeout) => rt.block_on(fut.timeout(timeout))
+                .map_err(|x| match x.into_inner() {
+                    Some(e) => e,
+                    _ => format_err!("Dns query timed out"),
+                })?,
+            None => rt.block_on(fut)?,
+        };
+
+        Ok(response)
     }
-}
-
-pub trait DnsResolver {
-    fn resolve(&self, name: &str) -> Result<Vec<IpAddr>>;
-
-    fn resolve_adv(&self, name: &str, record: RecordType) -> Result<DnsReply>;
 }
 
 impl DnsResolver for Resolver {
-    fn resolve(&self, name: &str) -> Result<Vec<IpAddr>> {
-        self.resolver.lookup_ip(name)
-            .map(Resolver::transform)
-            .map_err(|err| format_err!("resolve error: {}", err))
-    }
+    fn resolve(&self, name: &str, query_type: RecordType) -> Result<DnsReply> {
+        let name = Name::from_str(name)?;
 
-    fn resolve_adv(&self, name: &str, record: RecordType) -> Result<DnsReply> {
-        match self.resolver.lookup(name, record) {
-            Ok(reply) => Ok(reply.into()),
-            Err(err) => match err.kind() {
-                ResolveErrorKind::NoRecordsFound {
-                    query: _,
-                    valid_until: _,
-                } => Ok(DnsError::NXDomain.into()),
-                _ => Err(err.context("Failed to resolve").into()),
-            },
-        }
+        let address = self.ns.iter().next()
+            .ok_or_else(|| format_err!("No nameserver configured"))?;
+
+        let response: DnsResponse = if self.tcp {
+            let conn = TcpClientConnection::new(*address)?;
+            self.resolve_with(conn, &name, query_type)?
+        } else {
+            let conn = UdpClientConnection::new(*address)?;
+            self.resolve_with(conn, &name, query_type)?
+        };
+
+        let error = DnsError::from_response_code(&response.response_code());
+
+        let answers = response.answers().iter()
+            .map(|x| x.rdata().into())
+            .collect::<Vec<_>>();
+
+        Ok(DnsReply {
+            success: answers.clone(),
+            answers,
+            error,
+        })
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DnsReply {
+    pub answers: Vec<RData>,
+    // TODO: this field is deprecated
+    pub success: Vec<RData>,
+    pub error: Option<DnsError>,
+}
+
+impl DnsReply {
+    pub fn success(&self) -> Result<Vec<IpAddr>> {
+        if let Some(ref error) = self.error {
+            bail!("dns server returned error: {:?}", error)
+        }
+
+        let ips = self.answers.iter()
+            .flat_map(|x| match x {
+                RData::A(ip) => Some(IpAddr::V4(ip.clone())),
+                RData::AAAA(ip) => Some(IpAddr::V6(ip.clone())),
+                _ => None,
+            })
+            .collect();
+        Ok(ips)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AsyncResolver {
-    resolver: tdr::AsyncResolver,
+    pub ns: Vec<SocketAddr>,
+    #[serde(default)]
+    pub tcp: bool,
 }
 
 impl AsyncResolver {
     pub fn cloudflare() -> AsyncResolver {
-        AsyncResolver::with_udp_addr(&[String::from("1.1.1.1:53"),
-                                        String::from("1.0.0.1:53")]).unwrap()
+        AsyncResolver {
+            ns: vec![
+                "1.1.1.1:53".parse().unwrap(),
+                "1.0.0.1:53".parse().unwrap(),
+            ],
+            tcp: false,
+        }
     }
 
-    pub fn with_udp_addr(recursors: &[String]) -> Result<AsyncResolver> {
-        let mut config = ResolverConfig::new();
-
-        for recursor in recursors {
-            config.add_name_server(NameServerConfig {
-                socket_addr: recursor.parse()?,
-                protocol: Protocol::Udp,
-                tls_dns_name: None,
-            });
-        }
-
-        let mut opts = ResolverOpts::default();
-        opts.timeout = Duration::from_secs(1);
-
-        let mut rt = Runtime::new()?;
-        let (resolver, worker) = tdr::AsyncResolver::new(config, opts);
-        let worker = rt.block_on(worker);
-
-        let _worker = match worker {
-            Ok(worker) => worker,
-            Err(_) => bail!("resolver init error"), // TODO
-        };
-
+    /// Create a new resolver from /etc/resolv.conf
+    pub fn from_system() -> Result<AsyncResolver> {
+        let ns = dns_system_conf::read_system_conf()?;
         Ok(AsyncResolver {
-            resolver,
+            ns,
+            tcp: false,
         })
     }
 
-    pub fn with_udp(recursors: &[String]) -> Result<AsyncResolver> {
-        let recursors = recursors.iter()
-                            .map(|x| format!("{}:53", x))
-                            .collect::<Vec<_>>();
-        AsyncResolver::with_udp_addr(&recursors)
+    fn resolve_with<T: ClientConnection>(conn: T, name: &Name, query_type: RecordType) -> Result<(ClientFuture<T::SenderFuture, T::Sender, T::Response>, Resolving)> {
+        let client = SyncClient::new(conn);
+
+        let (bg, mut client) = client.new_future();
+
+        let fut = client.query(name.clone(), DNSClass::IN, query_type)
+            .map_err(Error::from)
+            .and_then(|response| {
+                let error = DnsError::from_response_code(&response.response_code());
+
+                let answers = response.answers().iter()
+                    .map(|x| x.rdata().into())
+                    .collect::<Vec<_>>();
+
+                Ok(DnsReply {
+                    success: answers.clone(),
+                    answers,
+                    error,
+                })
+            });
+
+        Ok((bg, Resolving(Box::new(fut))))
     }
 
-    pub fn resolve(&self, name: &str) -> Resolving {
-        let fut = self.resolver.lookup_ip(name)
-            .map(|lookup| {
-                Resolver::transform(lookup)
-            })
-            .map_err(|err| {
-                io::Error::new(io::ErrorKind::Other, format!("{:?}", err)) // TODO
-            });
-        Resolving(Box::new(fut))
+    pub fn resolve(&self, name: &str, query_type: RecordType) -> Result<(AsyncResolverFuture, Resolving)> {
+        let name = Name::from_str(name)?;
+
+        let address = self.ns.iter().next()
+            .ok_or_else(|| format_err!("No nameserver configured"))?;
+
+        if self.tcp {
+            let conn = TcpClientConnection::new(*address)?;
+            let (bg, fut) = Self::resolve_with(conn, &name, query_type)?;
+            Ok((AsyncResolverFuture::Tcp(bg), fut))
+        } else {
+            let conn = UdpClientConnection::new(*address)?;
+            let (bg, fut) = Self::resolve_with(conn, &name, query_type)?;
+            Ok((AsyncResolverFuture::Udp(bg), fut))
+        }
     }
+}
+
+pub enum AsyncResolverFuture {
+    Udp(ClientFuture<xfer::DnsMultiplexerConnect<UdpClientConnect, UdpClientStream, Signer>, DnsMultiplexer<UdpClientStream, Signer>, xfer::DnsMultiplexerSerialResponse>),
+    Tcp(ClientFuture<xfer::DnsMultiplexerConnect<TcpClientConnect, TcpClientStream<TcpStream>, Signer>, DnsMultiplexer<TcpClientStream<TcpStream>, Signer>, xfer::DnsMultiplexerSerialResponse>),
 }
 
 /// A Future representing work to connect to a URL
 pub struct Resolving(
-    Box<Future<Item = Vec<IpAddr>, Error = io::Error> + Send>,
+    Box<Future<Item = DnsReply, Error = Error> + Send>,
 );
 
 impl Future for Resolving {
-    type Item = Vec<IpAddr>;
-    type Error = io::Error;
+    type Item = DnsReply;
+    type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.0.poll()
@@ -325,18 +342,17 @@ mod tests {
 
     #[test]
     fn verify_dns_config() {
-        let config = DnsConfig::from_system().expect("DnsConfig::from_system");
+        let config = Resolver::from_system().expect("DnsConfig::from_system");
         let json = serde_json::to_string(&config).expect("to json");
         println!("{:?}", json);
-        let config = serde_json::from_str::<DnsConfig>(&json).expect("to json");
+        let resolver = serde_json::from_str::<Resolver>(&json).expect("to json");
 
-        let resolver = Resolver::from_config(config).expect("Resolver::from_config");
-        resolver.resolve("example.com").expect("resolve failed");
+        resolver.resolve("example.com", RecordType::A).expect("resolve failed");
     }
 
     #[test]
     fn verify_dns_config_from_json() {
-        let json = r#"{"ns":["1.1.1.1:53","1.1.1.1:53","1.0.0.1:53","1.0.0.1:53"]}"#;
-        let _config = serde_json::from_str::<DnsConfig>(&json).expect("to json");
+        let json = r#"{"ns":["1.1.1.1:53","1.0.0.1:53"]}"#;
+        let _resolver = serde_json::from_str::<Resolver>(&json).expect("to json");
     }
 }
