@@ -24,13 +24,18 @@ extern crate rustls;
 extern crate hyper_rustls;
 extern crate webpki_roots;
 extern crate ct_logs;
+extern crate trust_dns;
 extern crate trust_dns_proto;
-extern crate trust_dns_resolver;
 extern crate futures;
 extern crate bytes;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate failure;
 #[macro_use] extern crate log;
+
+#[cfg(unix)]
+extern crate resolv_conf;
+#[cfg(windows)]
+extern crate ipconfig;
 
 pub use hyper::Body;
 use http::response::Parts;
@@ -53,8 +58,9 @@ pub use http::Uri;
 
 mod connector;
 pub mod dns;
+pub mod dns_system_conf;
 use self::connector::Connector;
-pub use dns::{Resolver, DnsResolver};
+pub use dns::{Resolver, DnsResolver, RecordType};
 
 pub mod errors {
     pub use failure::{Error, ResultExt};
@@ -102,8 +108,8 @@ impl<R: DnsResolver> Client<R> {
             None => bail!("url has no host"),
         };
 
-        let record = self.resolver.resolve(&host)?;
-        match record.into_iter().next() {
+        let record = self.resolver.resolve(&host, RecordType::A)?;
+        match record.success()?.into_iter().next() {
             Some(record) => {
                 // TODO: make sure we only add the records we want
                 let mut cache = self.records.lock().unwrap();
