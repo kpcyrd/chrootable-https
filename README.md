@@ -1,9 +1,7 @@
-# chrootable-https [![Build Status][travis-img]][travis] [![Build status][appveyor-img]][appveyor] [![crates.io][crates-img]][crates] [![docs.rs][docs-img]][docs]
+# chrootable-https [![Build Status][travis-img]][travis] [![crates.io][crates-img]][crates] [![docs.rs][docs-img]][docs]
 
 [travis-img]:   https://travis-ci.com/kpcyrd/chrootable-https.svg?branch=master
 [travis]:       https://travis-ci.com/kpcyrd/chrootable-https
-[appveyor-img]: https://ci.appveyor.com/api/projects/status/o511x4s3ft6te7by/branch/master?svg=true
-[appveyor]:     https://ci.appveyor.com/project/kpcyrd/chrootable-https/branch/master
 [crates-img]:   https://img.shields.io/crates/v/chrootable-https.svg
 [crates]:       https://crates.io/crates/chrootable-https
 [docs-img]:     https://docs.rs/chrootable-https/badge.svg
