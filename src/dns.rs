@@ -27,6 +27,8 @@ use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DnsConfig {
     pub ns: Vec<SocketAddr>,
+    #[serde(default)]
+    pub tcp: bool,
 }
 
 impl DnsConfig {
@@ -37,6 +39,7 @@ impl DnsConfig {
             .collect();
         Ok(DnsConfig {
             ns,
+            tcp: false,
         })
     }
 }
@@ -153,11 +156,17 @@ impl Resolver {
     }
 
     pub fn from_config(config: DnsConfig) -> Result<Resolver> {
-        let mut ns = ResolverConfig::default();
+        let mut ns = ResolverConfig::new();
         for socket_addr in config.ns {
+            let protocol = if config.tcp {
+                Protocol::Tcp
+            } else {
+                Protocol::Udp
+            };
+
             ns.add_name_server(NameServerConfig {
                 socket_addr,
-                protocol: Protocol::Udp,
+                protocol,
                 tls_dns_name: None,
             });
         }
