@@ -58,7 +58,6 @@ pub use http::Uri;
 
 mod connector;
 pub mod dns;
-pub mod dns_system_conf;
 use self::connector::Connector;
 pub use dns::{Resolver, DnsResolver, RecordType};
 

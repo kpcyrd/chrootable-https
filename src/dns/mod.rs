@@ -1,8 +1,8 @@
 use errors::*;
-use dns_system_conf;
 use std::time::Duration;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
-use std::str::FromStr;
+use std::result;
+use std::str::{self, FromStr};
 
 use futures::Future;
 use futures::Poll;
@@ -24,12 +24,13 @@ use trust_dns::rr::dnssec::Signer;
 use trust_dns_proto::DnsMultiplexer;
 use trust_dns_proto::xfer;
 
+pub mod system_conf;
+
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum DnsError {
     FormErr,
     ServFail,
-    #[serde(rename = "NX")]
     NXDomain,
     Other,
     Refused,
@@ -127,6 +128,13 @@ impl<'a> From<&'a rdata::soa::SOA> for SOA {
     }
 }
 
+pub fn dns_name_to_string(name: &Name) -> Result<String> {
+    let labels = name.iter()
+        .map(str::from_utf8)
+        .collect::<result::Result<Vec<_>, _>>()?;
+    Ok(labels.join("."))
+}
+
 pub trait DnsResolver {
     fn resolve(&self, name: &str, query_type: RecordType) -> Result<DnsReply>;
 }
@@ -147,17 +155,17 @@ impl Resolver {
                 "1.0.0.1:53".parse().unwrap(),
             ],
             tcp: false,
-            timeout: Some(Duration::from_secs(1)),
+            timeout: Some(Duration::from_secs(3)),
         }
     }
 
     /// Create a new resolver from /etc/resolv.conf
     pub fn from_system() -> Result<Resolver> {
-        let ns = dns_system_conf::read_system_conf()?;
+        let ns = system_conf::read_system_conf()?;
         Ok(Resolver {
             ns,
             tcp: false,
-            timeout: Some(Duration::from_secs(1)),
+            timeout: Some(Duration::from_secs(3)),
         })
     }
 
@@ -209,11 +217,14 @@ impl DnsResolver for Resolver {
         let error = DnsError::from_response_code(&response.response_code());
 
         let answers = response.answers().iter()
-            .map(|x| x.rdata().into())
-            .collect::<Vec<_>>();
+            .map(|x| {
+                let name = dns_name_to_string(x.name())?;
+                let rdata =  x.rdata().into();
+                Ok((name, rdata))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(DnsReply {
-            success: answers.clone(),
             answers,
             error,
         })
@@ -222,9 +233,7 @@ impl DnsResolver for Resolver {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct DnsReply {
-    pub answers: Vec<RData>,
-    // TODO: this field is deprecated
-    pub success: Vec<RData>,
+    pub answers: Vec<(String, RData)>,
     pub error: Option<DnsError>,
 }
 
@@ -235,7 +244,7 @@ impl DnsReply {
         }
 
         let ips = self.answers.iter()
-            .flat_map(|x| match x {
+            .flat_map(|x| match x.1 {
                 RData::A(ip) => Some(IpAddr::V4(ip.clone())),
                 RData::AAAA(ip) => Some(IpAddr::V6(ip.clone())),
                 _ => None,
@@ -265,7 +274,7 @@ impl AsyncResolver {
 
     /// Create a new resolver from /etc/resolv.conf
     pub fn from_system() -> Result<AsyncResolver> {
-        let ns = dns_system_conf::read_system_conf()?;
+        let ns = system_conf::read_system_conf()?;
         Ok(AsyncResolver {
             ns,
             tcp: false,
@@ -283,11 +292,14 @@ impl AsyncResolver {
                 let error = DnsError::from_response_code(&response.response_code());
 
                 let answers = response.answers().iter()
-                    .map(|x| x.rdata().into())
-                    .collect::<Vec<_>>();
+                    .map(|x| {
+                        let name = dns_name_to_string(x.name())?;
+                        let rdata =  x.rdata().into();
+                        Ok((name, rdata))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
 
                 Ok(DnsReply {
-                    success: answers.clone(),
                     answers,
                     error,
                 })
@@ -382,7 +394,6 @@ mod tests {
         println!("{:?}", x);
         assert_eq!(x, DnsReply {
             answers: Vec::new(),
-            success: Vec::new(),
             error: Some(DnsError::NXDomain),
         });
     }
@@ -394,7 +405,6 @@ mod tests {
         println!("{:?}", x);
         assert_eq!(x, DnsReply {
             answers: Vec::new(),
-            success: Vec::new(),
             error: None,
         });
     }
