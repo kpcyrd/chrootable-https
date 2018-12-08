@@ -132,6 +132,7 @@ pub trait DnsResolver: Send + Sync {
     fn resolve(&self, name: &str, query_type: RecordType) -> Resolving;
 }
 
+/// An asynchronous DNS resolver.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Resolver {
     pub ns: Vec<SocketAddr>,
