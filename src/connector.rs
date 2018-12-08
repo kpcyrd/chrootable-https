@@ -94,6 +94,7 @@ where
 }
 
 /// A Future representing work to connect to a URL
+#[must_use = "futures do nothing unless polled"]
 pub struct Connecting<T>(Box<Future<Item = (T, connect::Connected), Error = io::Error> + Send>);
 
 impl<T> Future for Connecting<T> {
@@ -106,6 +107,7 @@ impl<T> Future for Connecting<T> {
 }
 
 /// A Future representing work to resolve a DNS query
+#[must_use = "futures do nothing unless polled"]
 pub struct Resolving(Box<Future<Item = Destination, Error = Error> + Send>);
 
 impl Future for Resolving {
