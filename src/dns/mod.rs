@@ -1,31 +1,24 @@
 use errors::*;
-use std::time::Duration;
-use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::result;
 use std::str::{self, FromStr};
+use std::time::Duration;
 
-use futures::Future;
 use futures::Poll;
+use futures::{future, Future};
 use tokio::prelude::FutureExt;
 use tokio::runtime::Runtime;
-use tokio::net::TcpStream;
 use trust_dns::client::ClientHandle;
+use trust_dns::client::{Client, ClientConnection, SyncClient};
+use trust_dns::op::ResponseCode;
 use trust_dns::rr::rdata;
 use trust_dns::rr::record_data;
 pub use trust_dns::rr::record_type::RecordType;
-use trust_dns::client::{Client, ClientConnection, ClientFuture, SyncClient};
-use trust_dns::udp::{UdpClientConnection, UdpClientStream};
-use trust_dns_proto::udp::UdpClientConnect;
-use trust_dns::tcp::{TcpClientConnection, TcpClientStream};
-use trust_dns_proto::tcp::TcpClientConnect;
-use trust_dns::op::{DnsResponse, ResponseCode};
 use trust_dns::rr::{DNSClass, Name};
-use trust_dns::rr::dnssec::Signer;
-use trust_dns_proto::DnsMultiplexer;
-use trust_dns_proto::xfer;
+use trust_dns::tcp::TcpClientConnection;
+use trust_dns::udp::UdpClientConnection;
 
 pub mod system_conf;
-
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum DnsError {
@@ -85,20 +78,19 @@ impl<'a> From<&'a record_data::RData> for RData {
     fn from(rdata: &'a record_data::RData) -> RData {
         use trust_dns::rr::record_data::RData::*;
         match rdata {
-            A(ip)       => RData::A(ip.clone()),
-            AAAA(ip)    => RData::AAAA(ip.clone()),
+            A(ip) => RData::A(ip.clone()),
+            AAAA(ip) => RData::AAAA(ip.clone()),
             CNAME(name) => RData::CNAME(name.to_string()),
-            MX(mx)      => RData::MX((mx.preference(), mx.exchange().to_string())),
-            NS(ns)      => RData::NS(ns.to_string()),
-            PTR(ptr)    => RData::PTR(ptr.to_string()),
-            SOA(soa)    => RData::SOA(soa.into()),
-            SRV(srv)    => RData::SRV((srv.target().to_string(), srv.port())),
-            TXT(txt)    => RData::TXT(txt.iter()
-                                        .fold(Vec::new(), |mut a, b| {
-                                            a.extend(b.iter());
-                                            a
-                                        })),
-            _           => RData::Other("unknown".to_string()),
+            MX(mx) => RData::MX((mx.preference(), mx.exchange().to_string())),
+            NS(ns) => RData::NS(ns.to_string()),
+            PTR(ptr) => RData::PTR(ptr.to_string()),
+            SOA(soa) => RData::SOA(soa.into()),
+            SRV(srv) => RData::SRV((srv.target().to_string(), srv.port())),
+            TXT(txt) => RData::TXT(txt.iter().fold(Vec::new(), |mut a, b| {
+                a.extend(b.iter());
+                a
+            })),
+            _ => RData::Other("unknown".to_string()),
         }
     }
 }
@@ -111,7 +103,7 @@ pub struct SOA {
     refresh: i32,
     retry: i32,
     expire: i32,
-    minimum: u32
+    minimum: u32,
 }
 
 impl<'a> From<&'a rdata::soa::SOA> for SOA {
@@ -129,14 +121,15 @@ impl<'a> From<&'a rdata::soa::SOA> for SOA {
 }
 
 pub fn dns_name_to_string(name: &Name) -> Result<String> {
-    let labels = name.iter()
+    let labels = name
+        .iter()
         .map(str::from_utf8)
         .collect::<result::Result<Vec<_>, _>>()?;
     Ok(labels.join("."))
 }
 
-pub trait DnsResolver {
-    fn resolve(&self, name: &str, query_type: RecordType) -> Result<DnsReply>;
+pub trait DnsResolver: Send + Sync {
+    fn resolve(&self, name: &str, query_type: RecordType) -> Resolving;
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -148,18 +141,18 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    /// Creates a new resolver using the [CloudFlare Authoritative DNS][cf] service.
+    ///
+    /// [cf]: https://www.cloudflare.com/learning/dns/what-is-1.1.1.1/
     pub fn cloudflare() -> Resolver {
         Resolver {
-            ns: vec![
-                "1.1.1.1:53".parse().unwrap(),
-                "1.0.0.1:53".parse().unwrap(),
-            ],
+            ns: vec!["1.1.1.1:53".parse().unwrap(), "1.0.0.1:53".parse().unwrap()],
             tcp: false,
             timeout: Some(Duration::from_secs(3)),
         }
     }
 
-    /// Create a new resolver from /etc/resolv.conf
+    /// Creates a new resolver from `/etc/resolv.conf`.
     pub fn from_system() -> Result<Resolver> {
         let ns = system_conf::read_system_conf()?;
         Ok(Resolver {
@@ -169,65 +162,79 @@ impl Resolver {
         })
     }
 
+    /// Sets a timeout within which each DNS query must complete.
+    ///
+    /// Default setting is no timeout.
     pub fn timeout(&mut self, timeout: Option<Duration>) {
         self.timeout = timeout;
     }
 }
 
 impl Resolver {
-    fn resolve_with<T: ClientConnection>(&self, conn: T, name: &Name, query_type: RecordType) -> Result<DnsResponse> {
+    fn resolve_with<T>(&self, conn: T, name: Name, query_type: RecordType) -> Resolving
+    where
+        T: ClientConnection,
+    {
         let client = SyncClient::new(conn);
-
-        let mut reactor = Runtime::new()?;
         let (bg, mut client) = client.new_future();
-        let rt = reactor
-            .spawn(bg);
 
-        let fut = client.query(name.clone(), DNSClass::IN, query_type)
-            .map_err(Error::from);
+        let query = future::lazy(move || {
+            tokio::executor::spawn(bg);
+            client
+                .query(name, DNSClass::IN, query_type)
+                .map_err(Error::from)
+        });
 
-        let response = match self.timeout {
-            Some(timeout) => rt.block_on(fut.timeout(timeout))
-                .map_err(|x| match x.into_inner() {
-                    Some(e) => e,
-                    _ => format_err!("Dns query timed out"),
-                })?,
-            None => rt.block_on(fut)?,
+        let response: Box<Future<Item = _, Error = _> + Send> = match self.timeout {
+            Some(ref timeout) => Box::new(query.timeout(*timeout).map_err(|e| {
+                e.into_inner()
+                    .unwrap_or_else(|| format_err!("DNS query timed out"))
+            })),
+            None => Box::new(query),
         };
 
-        Ok(response)
+        let reply = response.and_then(|response| {
+            let error = DnsError::from_response_code(&response.response_code());
+
+            let answers = response
+                .answers()
+                .iter()
+                .map(|x| {
+                    let name = dns_name_to_string(x.name())?;
+                    let rdata = x.rdata().into();
+                    Ok((name, rdata))
+                }).collect::<Result<Vec<_>>>()?;
+
+            Ok(DnsReply { answers, error })
+        });
+
+        Resolving::new(reply)
     }
 }
 
 impl DnsResolver for Resolver {
-    fn resolve(&self, name: &str, query_type: RecordType) -> Result<DnsReply> {
-        let name = Name::from_str(name)?;
-
-        let address = self.ns.iter().next()
-            .ok_or_else(|| format_err!("No nameserver configured"))?;
-
-        let response: DnsResponse = if self.tcp {
-            let conn = TcpClientConnection::new(*address)?;
-            self.resolve_with(conn, &name, query_type)?
-        } else {
-            let conn = UdpClientConnection::new(*address)?;
-            self.resolve_with(conn, &name, query_type)?
+    fn resolve(&self, name: &str, query_type: RecordType) -> Resolving {
+        let name = match Name::from_str(name) {
+            Ok(name) => name,
+            Err(e) => return Resolving::new(future::err(e.into())),
         };
 
-        let error = DnsError::from_response_code(&response.response_code());
+        let address = match self.ns.first() {
+            Some(ref address) => *address,
+            None => return Resolving::new(future::err(format_err!("No nameserver configured"))),
+        };
 
-        let answers = response.answers().iter()
-            .map(|x| {
-                let name = dns_name_to_string(x.name())?;
-                let rdata =  x.rdata().into();
-                Ok((name, rdata))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(DnsReply {
-            answers,
-            error,
-        })
+        if self.tcp {
+            match TcpClientConnection::new(*address) {
+                Ok(conn) => self.resolve_with(conn, name, query_type),
+                Err(e) => return Resolving::new(future::err(e.into())),
+            }
+        } else {
+            match UdpClientConnection::new(*address) {
+                Ok(conn) => self.resolve_with(conn, name, query_type),
+                Err(e) => return Resolving::new(future::err(e.into())),
+            }
+        }
     }
 }
 
@@ -243,98 +250,38 @@ impl DnsReply {
             bail!("dns server returned error: {:?}", error)
         }
 
-        let ips = self.answers.iter()
+        let ips = self
+            .answers
+            .iter()
             .flat_map(|x| match x.1 {
                 RData::A(ip) => Some(IpAddr::V4(ip.clone())),
                 RData::AAAA(ip) => Some(IpAddr::V6(ip.clone())),
                 _ => None,
-            })
-            .collect();
+            }).collect();
+
         Ok(ips)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct AsyncResolver {
-    pub ns: Vec<SocketAddr>,
-    #[serde(default)]
-    pub tcp: bool,
-}
+/// A `Future` that represents a resolving DNS query.
+#[must_use = "futures do nothing unless polled"]
+pub struct Resolving(Box<Future<Item = DnsReply, Error = Error> + Send>);
 
-impl AsyncResolver {
-    pub fn cloudflare() -> AsyncResolver {
-        AsyncResolver {
-            ns: vec![
-                "1.1.1.1:53".parse().unwrap(),
-                "1.0.0.1:53".parse().unwrap(),
-            ],
-            tcp: false,
-        }
+impl Resolving {
+    /// Creates a new `Resolving` future.
+    pub(crate) fn new<F>(inner: F) -> Self
+    where
+        F: Future<Item = DnsReply, Error = Error> + Send + 'static,
+    {
+        Resolving(Box::new(inner))
     }
 
-    /// Create a new resolver from /etc/resolv.conf
-    pub fn from_system() -> Result<AsyncResolver> {
-        let ns = system_conf::read_system_conf()?;
-        Ok(AsyncResolver {
-            ns,
-            tcp: false,
-        })
-    }
-
-    fn resolve_with<T: ClientConnection>(conn: T, name: &Name, query_type: RecordType) -> Result<(ClientFuture<T::SenderFuture, T::Sender, T::Response>, Resolving)> {
-        let client = SyncClient::new(conn);
-
-        let (bg, mut client) = client.new_future();
-
-        let fut = client.query(name.clone(), DNSClass::IN, query_type)
-            .map_err(Error::from)
-            .and_then(|response| {
-                let error = DnsError::from_response_code(&response.response_code());
-
-                let answers = response.answers().iter()
-                    .map(|x| {
-                        let name = dns_name_to_string(x.name())?;
-                        let rdata =  x.rdata().into();
-                        Ok((name, rdata))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                Ok(DnsReply {
-                    answers,
-                    error,
-                })
-            });
-
-        Ok((bg, Resolving(Box::new(fut))))
-    }
-
-    pub fn resolve(&self, name: &str, query_type: RecordType) -> Result<(AsyncResolverFuture, Resolving)> {
-        let name = Name::from_str(name)?;
-
-        let address = self.ns.iter().next()
-            .ok_or_else(|| format_err!("No nameserver configured"))?;
-
-        if self.tcp {
-            let conn = TcpClientConnection::new(*address)?;
-            let (bg, fut) = Self::resolve_with(conn, &name, query_type)?;
-            Ok((AsyncResolverFuture::Tcp(bg), fut))
-        } else {
-            let conn = UdpClientConnection::new(*address)?;
-            let (bg, fut) = Self::resolve_with(conn, &name, query_type)?;
-            Ok((AsyncResolverFuture::Udp(bg), fut))
-        }
+    /// Drives this future to completion, eventually returning a DNS reply.
+    pub fn wait_for_response(self) -> Result<DnsReply> {
+        let mut rt = Runtime::new()?;
+        rt.block_on(self)
     }
 }
-
-pub enum AsyncResolverFuture {
-    Udp(ClientFuture<xfer::DnsMultiplexerConnect<UdpClientConnect, UdpClientStream, Signer>, DnsMultiplexer<UdpClientStream, Signer>, xfer::DnsMultiplexerSerialResponse>),
-    Tcp(ClientFuture<xfer::DnsMultiplexerConnect<TcpClientConnect, TcpClientStream<TcpStream>, Signer>, DnsMultiplexer<TcpClientStream<TcpStream>, Signer>, xfer::DnsMultiplexerSerialResponse>),
-}
-
-/// A Future representing work to connect to a URL
-pub struct Resolving(
-    Box<Future<Item = DnsReply, Error = Error> + Send>,
-);
 
 impl Future for Resolving {
     type Item = DnsReply;
@@ -345,21 +292,24 @@ impl Future for Resolving {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     extern crate serde_json;
 
     use super::*;
+    use tokio::runtime::current_thread::Runtime;
 
     #[test]
     fn verify_dns_config() {
+        let mut runtime = Runtime::new().unwrap();
+
         let config = Resolver::from_system().expect("DnsConfig::from_system");
         let json = serde_json::to_string(&config).expect("to json");
         println!("{:?}", json);
         let resolver = serde_json::from_str::<Resolver>(&json).expect("to json");
 
-        resolver.resolve("example.com", RecordType::A).expect("resolve failed");
+        let fut = resolver.resolve("example.com", RecordType::A);
+        runtime.block_on(fut).expect("resolve failed");
     }
 
     #[test]
@@ -370,42 +320,56 @@ mod tests {
 
     #[test]
     fn verify_dns_query() {
+        let mut runtime = Runtime::new().unwrap();
         let resolver = Resolver::from_system().expect("DnsConfig::from_system");
-        let x = resolver.resolve("example.com", RecordType::A).expect("resolve failed");
+        let fut = resolver.resolve("example.com", RecordType::A);
+        let x = runtime.block_on(fut).expect("resolve failed");
         println!("{:?}", x);
         assert!(x.error.is_none());
     }
 
     #[test]
     fn verify_dns_query_timeout() {
+        let mut runtime = Runtime::new().unwrap();
         let resolver = Resolver {
             ns: vec!["1.2.3.4:53".parse().unwrap()],
             tcp: false,
             timeout: Some(Duration::from_millis(100)),
         };
-        let x = resolver.resolve("example.com", RecordType::A);
+        let fut = resolver.resolve("example.com", RecordType::A);
+        let x = runtime.block_on(fut);
         assert!(x.is_err());
     }
 
     #[test]
     fn verify_dns_query_nx() {
+        let mut runtime = Runtime::new().unwrap();
         let resolver = Resolver::from_system().expect("DnsConfig::from_system");
-        let x = resolver.resolve("nonexistant.example.com", RecordType::A).expect("resolve failed");
+        let fut = resolver.resolve("nonexistant.example.com", RecordType::A);
+        let x = runtime.block_on(fut).expect("resolve failed");
         println!("{:?}", x);
-        assert_eq!(x, DnsReply {
-            answers: Vec::new(),
-            error: Some(DnsError::NXDomain),
-        });
+        assert_eq!(
+            x,
+            DnsReply {
+                answers: Vec::new(),
+                error: Some(DnsError::NXDomain),
+            }
+        );
     }
 
     #[test]
     fn verify_dns_query_empty_cname() {
+        let mut runtime = Runtime::new().unwrap();
         let resolver = Resolver::from_system().expect("DnsConfig::from_system");
-        let x = resolver.resolve("example.com", RecordType::CNAME).expect("resolve failed");
+        let fut = resolver.resolve("example.com", RecordType::CNAME);
+        let x = runtime.block_on(fut).expect("resolve failed");
         println!("{:?}", x);
-        assert_eq!(x, DnsReply {
-            answers: Vec::new(),
-            error: None,
-        });
+        assert_eq!(
+            x,
+            DnsReply {
+                answers: Vec::new(),
+                error: None,
+            }
+        );
     }
 }
