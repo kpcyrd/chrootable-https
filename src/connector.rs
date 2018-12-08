@@ -1,5 +1,5 @@
 use ct_logs;
-use futures::{IntoFuture, Poll};
+use futures::{future, Poll};
 use hyper::client::connect::Destination;
 use hyper::client::connect::HttpConnector;
 use hyper::client::connect::{self, Connect};
@@ -8,7 +8,7 @@ use hyper_rustls::HttpsConnector;
 use rustls::ClientConfig;
 use webpki_roots;
 
-use errors::Result;
+use errors::Error;
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
@@ -16,26 +16,30 @@ use std::sync::{Arc, Mutex};
 
 pub struct Connector<T> {
     http: T,
-    // resolver: ResolverFuture,
     records: Arc<Mutex<HashMap<String, IpAddr>>>,
 }
 
 impl<T> Connector<T> {
-    pub fn resolve_dest(&self, mut dest: Destination) -> Result<Destination> {
-        let ip = {
-            let cache = self.records.lock().unwrap();
-            cache.get(dest.host()).map(|x| x.to_owned())
-        };
+    pub fn resolve_dest(&self, dest: Destination) -> Resolving {
+        let records = self.records.clone();
+        let resolved = future::lazy(move || {
+            let cache = records.lock().unwrap_or_else(|x| x.into_inner());
+            let ip = cache.get(dest.host()).map(|x| x.to_owned());
+            Ok((dest, ip))
+        });
 
-        let ip = match ip {
-            Some(IpAddr::V4(ip)) => ip.to_string(),
-            Some(IpAddr::V6(ip)) => format!("[{}]", ip),
-            None => bail!("host wasn't pre-resolved"),
-        };
+        let dest = Box::new(resolved.and_then(|(mut dest, ip)| {
+            let ip = match ip {
+                Some(IpAddr::V4(ip)) => ip.to_string(),
+                Some(IpAddr::V6(ip)) => format!("[{}]", ip),
+                None => bail!("host wasn't pre-resolved"),
+            };
 
-        dest.set_host(&ip)?;
+            dest.set_host(&ip)?;
+            Ok(dest)
+        }));
 
-        Ok(dest)
+        Resolving(dest)
     }
 }
 
@@ -77,7 +81,6 @@ where
         debug!("original destination: {:?}", dest);
         let resolving = self
             .resolve_dest(dest)
-            .into_future()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
 
         let http = self.http.clone();
@@ -96,6 +99,18 @@ pub struct Connecting<T>(Box<Future<Item = (T, connect::Connected), Error = io::
 impl<T> Future for Connecting<T> {
     type Item = (T, connect::Connected);
     type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.0.poll()
+    }
+}
+
+/// A Future representing work to resolve a DNS query
+pub struct Resolving(Box<Future<Item = Destination, Error = Error> + Send>);
+
+impl Future for Resolving {
+    type Item = Destination;
+    type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.0.poll()
