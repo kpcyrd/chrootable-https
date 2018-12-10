@@ -6,6 +6,7 @@ authors = ["kpcyrd <git@rxv.cc>"]
 license = "LGPL-3.0"
 repository = "https://github.com/kpcyrd/chrootable-https"
 readme = "README.md"
+edition = "2018"
 
 [badges]
 travis-ci = { repository = "kpcyrd/chrootable-https" }

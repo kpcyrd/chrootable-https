@@ -1,5 +1,5 @@
 use ct_logs;
-use dns::{DnsResolver, RecordType};
+use crate::dns::{DnsResolver, RecordType};
 use futures::{future, Poll};
 use hyper::client::connect::Destination;
 use hyper::client::connect::HttpConnector;
@@ -9,7 +9,7 @@ use hyper_rustls::HttpsConnector;
 use rustls::ClientConfig;
 use webpki_roots;
 
-use errors::Error;
+use crate::errors::Error;
 use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;

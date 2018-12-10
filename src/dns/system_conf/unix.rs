@@ -1,4 +1,4 @@
-use errors::*;
+use crate::errors::*;
 use resolv_conf;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};

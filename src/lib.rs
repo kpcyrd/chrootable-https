@@ -17,27 +17,14 @@
 //! ```
 
 #![warn(unused_extern_crates)]
-extern crate bytes;
-extern crate ct_logs;
-extern crate futures;
-pub extern crate http;
-pub extern crate hyper;
-extern crate hyper_rustls;
-extern crate rustls;
-extern crate tokio;
-extern crate trust_dns;
-extern crate webpki_roots;
+pub use http;
+pub use hyper;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
 extern crate failure;
 #[macro_use]
 extern crate log;
-
-#[cfg(windows)]
-extern crate ipconfig;
-#[cfg(unix)]
-extern crate resolv_conf;
 
 use bytes::Bytes;
 pub use http::header;
@@ -60,13 +47,13 @@ use std::time::Duration;
 mod connector;
 pub mod dns;
 use self::connector::Connector;
-pub use dns::{DnsResolver, RecordType, Resolver};
+pub use crate::dns::{DnsResolver, RecordType, Resolver};
 
 pub mod errors {
     pub use failure::{Error, ResultExt};
     pub type Result<T> = ::std::result::Result<T, Error>;
 }
-pub use errors::*;
+pub use crate::errors::*;
 
 /// A Client to make outgoing HTTP requests.
 ///
@@ -235,7 +222,7 @@ impl From<(Parts, Bytes)> for Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dns::Resolver;
+    use crate::dns::Resolver;
     use std::time::{Duration, Instant};
 
     #[test]

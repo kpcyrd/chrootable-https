@@ -1,4 +1,4 @@
-use errors::*;
+use crate::errors::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::result;
 use std::str::{self, FromStr};
@@ -295,9 +295,8 @@ impl Future for Resolving {
 
 #[cfg(test)]
 mod tests {
-    extern crate serde_json;
-
     use super::*;
+    use serde_json;
     use tokio::runtime::current_thread::Runtime;
 
     #[test]
