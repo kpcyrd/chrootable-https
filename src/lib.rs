@@ -54,8 +54,7 @@ use tokio::runtime::Runtime;
 
 pub use http::Uri;
 use std::collections::HashMap;
-use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 mod connector;
@@ -74,9 +73,7 @@ pub use errors::*;
 /// Uses an specific DNS resolver.
 #[derive(Debug)]
 pub struct Client<R: DnsResolver> {
-    client: Arc<hyper::Client<HttpsConnector<Connector<HttpConnector>>>>,
-    resolver: Arc<R>,
-    records: Arc<Mutex<HashMap<String, IpAddr>>>,
+    client: Arc<hyper::Client<HttpsConnector<Connector<HttpConnector, R>>>>,
     timeout: Option<Duration>,
 }
 
@@ -85,16 +82,13 @@ impl<R: DnsResolver + 'static> Client<R> {
     ///
     /// This bypasses `/etc/resolv.conf`.
     pub fn new(resolver: R) -> Client<R> {
-        let records = Arc::new(Mutex::new(HashMap::new()));
-        let https = Connector::https(records.clone());
+        let https = Connector::https(Arc::new(resolver));
         let client = hyper::Client::builder()
             .keep_alive(false)
             .build::<_, hyper::Body>(https);
 
         Client {
             client: Arc::new(client),
-            resolver: Arc::new(resolver),
-            records,
             timeout: None,
         }
     }
@@ -102,37 +96,6 @@ impl<R: DnsResolver + 'static> Client<R> {
     /// Set a timeout (default setting is no timeout).
     pub fn timeout(&mut self, timeout: Duration) {
         self.timeout = Some(timeout);
-    }
-
-    /// Pre-populate the DNS cache. This function is usually called internally.
-    pub fn pre_resolve(&self, uri: Uri) -> PreResolving {
-        let resolver = self.resolver.clone();
-        let records = self.records.clone();
-
-        let host = future::lazy(move || match uri.host() {
-            Some(host) => Ok(host.to_string()),
-            None => bail!("url has no host"),
-        });
-
-        let resolve = host.and_then(move |host| {
-            resolver
-                .resolve(&host, RecordType::A)
-                .map(|record| (host, record))
-        });
-
-        let cache = resolve.and_then(move |(host, record)| {
-            match record.success()?.into_iter().next() {
-                Some(record) => {
-                    // TODO: make sure we only add the records we want
-                    let mut cache = records.lock().unwrap_or_else(|x| x.into_inner());
-                    cache.insert(host.to_string(), record);
-                    Ok(())
-                }
-                None => bail!("no record found"),
-            }
-        });
-
-        PreResolving::new(cache)
     }
 
     /// Shorthand function to do a GET request with [`HttpClient::request`].
@@ -173,9 +136,7 @@ impl<R: DnsResolver + 'static> HttpClient for Client<R> {
         let timeout = self.timeout.clone();
 
         info!("sending request to {:?}", request.uri());
-        let fut = self
-            .pre_resolve(request.uri().clone())
-            .and_then(move |_| client.request(request).map_err(Error::from))
+        let fut = client.request(request).map_err(Error::from)
             .and_then(|res| {
                 debug!("http response: {:?}", res);
                 let (parts, body) = res.into_parts();
@@ -196,29 +157,6 @@ impl<R: DnsResolver + 'static> HttpClient for Client<R> {
         });
 
         ResponseFuture::new(reply)
-    }
-}
-
-/// A `Future` that represents a DNS query being pre-resolved and saved in the cache.
-#[must_use = "futures do nothing unless polled"]
-pub struct PreResolving(Box<Future<Item = (), Error = Error> + Send>);
-
-impl PreResolving {
-    /// Creates a new `PreResolving` future.
-    pub(crate) fn new<F>(inner: F) -> Self
-    where
-        F: Future<Item = (), Error = Error> + Send + 'static,
-    {
-        PreResolving(Box::new(inner))
-    }
-}
-
-impl Future for PreResolving {
-    type Item = ();
-    type Error = Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.0.poll()
     }
 }
 

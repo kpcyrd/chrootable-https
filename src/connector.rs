@@ -1,4 +1,5 @@
 use ct_logs;
+use dns::{DnsResolver, RecordType};
 use futures::{future, Poll};
 use hyper::client::connect::Destination;
 use hyper::client::connect::HttpConnector;
@@ -9,51 +10,56 @@ use rustls::ClientConfig;
 use webpki_roots;
 
 use errors::Error;
-use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-pub struct Connector<T> {
+pub struct Connector<T, R: DnsResolver> {
     http: T,
-    records: Arc<Mutex<HashMap<String, IpAddr>>>,
+    resolver: Arc<R>,
 }
 
-impl<T> Connector<T> {
-    pub fn resolve_dest(&self, dest: Destination) -> Resolving {
-        let records = self.records.clone();
-        let resolved = future::lazy(move || {
-            let cache = records.lock().unwrap_or_else(|x| x.into_inner());
-            let ip = cache.get(dest.host()).map(|x| x.to_owned());
-            Ok((dest, ip))
+impl<T, R: DnsResolver + 'static> Connector<T, R> {
+    pub fn resolve_dest(&self, mut dest: Destination) -> Resolving {
+        let resolver = self.resolver.clone();
+        let host = dest.host().to_string();
+
+        let resolve = future::lazy(move || {
+            resolver
+                .resolve(&host, RecordType::A)
         });
 
-        let dest = Box::new(resolved.and_then(|(mut dest, ip)| {
-            let ip = match ip {
-                Some(IpAddr::V4(ip)) => ip.to_string(),
-                Some(IpAddr::V6(ip)) => format!("[{}]", ip),
-                None => bail!("host wasn't pre-resolved"),
-            };
+        let resolved = Box::new(resolve.and_then(move |record| {
+            // TODO: we might have more than one record available
+            match record.success()?.into_iter().next() {
+                Some(record) => {
+                    let ip = match record {
+                        IpAddr::V4(ip) => ip.to_string(),
+                        IpAddr::V6(ip) => format!("[{}]", ip),
+                    };
 
-            dest.set_host(&ip)?;
-            Ok(dest)
+                    dest.set_host(&ip)?;
+                    Ok(dest)
+                }
+                None => bail!("no record found"),
+            }
         }));
 
-        Resolving(dest)
+        Resolving(resolved)
     }
 }
 
-impl Connector<HttpConnector> {
-    pub fn new(records: Arc<Mutex<HashMap<String, IpAddr>>>) -> Connector<HttpConnector> {
+impl<R: DnsResolver> Connector<HttpConnector, R> {
+    pub fn new(resolver: Arc<R>) -> Connector<HttpConnector, R> {
         let mut http = HttpConnector::new(4);
         http.enforce_http(false);
-        Connector { http, records }
+        Connector { http, resolver }
     }
 
     pub fn https(
-        records: Arc<Mutex<HashMap<String, IpAddr>>>,
-    ) -> HttpsConnector<Connector<HttpConnector>> {
-        let http = Connector::new(records);
+        resolver: Arc<R>,
+    ) -> HttpsConnector<Connector<HttpConnector, R>> {
+        let http = Connector::new(resolver);
 
         let mut config = ClientConfig::new();
         config
@@ -65,13 +71,15 @@ impl Connector<HttpConnector> {
     }
 }
 
-impl<T> Connect for Connector<T>
+impl<T, R> Connect for Connector<T, R>
 where
     T: Connect<Error = io::Error>,
     T: Clone,
     T: 'static,
     T::Transport: 'static,
     T::Future: 'static,
+    R: DnsResolver,
+    R: 'static,
 {
     type Transport = T::Transport;
     type Error = io::Error;
