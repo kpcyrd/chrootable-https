@@ -1,57 +1,65 @@
-use hyper_rustls::HttpsConnector;
-use hyper::rt::Future;
-use hyper::client::connect::{self, Connect};
-use hyper::client::connect::HttpConnector;
-use hyper::client::connect::Destination;
+use ct_logs;
+use dns::{DnsResolver, RecordType};
 use futures::{future, Poll};
+use hyper::client::connect::Destination;
+use hyper::client::connect::HttpConnector;
+use hyper::client::connect::{self, Connect};
+use hyper::rt::Future;
+use hyper_rustls::HttpsConnector;
 use rustls::ClientConfig;
 use webpki_roots;
-use ct_logs;
 
+use errors::Error;
 use std::io;
 use std::net::IpAddr;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use errors::Result;
+use std::sync::Arc;
 
-
-pub struct Connector<T> {
+pub struct Connector<T, R: DnsResolver> {
     http: T,
-    // resolver: ResolverFuture,
-    records: Arc<Mutex<HashMap<String, IpAddr>>>,
+    resolver: Arc<R>,
 }
 
-impl<T> Connector<T> {
-    pub fn resolve_dest(&self, mut dest: Destination) -> Result<Destination> {
-        let ip = {
-            let cache = self.records.lock().unwrap();
-            cache.get(dest.host()).map(|x| x.to_owned())
-        };
+impl<T, R: DnsResolver + 'static> Connector<T, R> {
+    pub fn resolve_dest(&self, mut dest: Destination) -> Resolving {
+        let resolver = self.resolver.clone();
+        let host = dest.host().to_string();
 
-        let ip = match ip {
-            Some(IpAddr::V4(ip)) => ip.to_string(),
-            Some(IpAddr::V6(ip)) => format!("[{}]", ip),
-            None => bail!("host wasn't pre-resolved"),
-        };
+        let resolve = future::lazy(move || {
+            resolver
+                .resolve(&host, RecordType::A)
+        });
 
-        dest.set_host(&ip)?;
+        let resolved = Box::new(resolve.and_then(move |record| {
+            // TODO: we might have more than one record available
+            match record.success()?.into_iter().next() {
+                Some(record) => {
+                    let ip = match record {
+                        IpAddr::V4(ip) => ip.to_string(),
+                        IpAddr::V6(ip) => format!("[{}]", ip),
+                    };
 
-        Ok(dest)
+                    dest.set_host(&ip)?;
+                    Ok(dest)
+                }
+                None => bail!("no record found"),
+            }
+        }));
+
+        Resolving(resolved)
     }
 }
 
-impl Connector<HttpConnector> {
-    pub fn new(records: Arc<Mutex<HashMap<String, IpAddr>>>) -> Connector<HttpConnector> {
+impl<R: DnsResolver> Connector<HttpConnector, R> {
+    pub fn new(resolver: Arc<R>) -> Connector<HttpConnector, R> {
         let mut http = HttpConnector::new(4);
         http.enforce_http(false);
-        Connector {
-            http,
-            records,
-        }
+        Connector { http, resolver }
     }
 
-    pub fn https(records: Arc<Mutex<HashMap<String, IpAddr>>>) -> HttpsConnector<Connector<HttpConnector>> {
-        let http = Connector::new(records);
+    pub fn https(
+        resolver: Arc<R>,
+    ) -> HttpsConnector<Connector<HttpConnector, R>> {
+        let http = Connector::new(resolver);
 
         let mut config = ClientConfig::new();
         config
@@ -63,13 +71,15 @@ impl Connector<HttpConnector> {
     }
 }
 
-impl<T> Connect for Connector<T>
+impl<T, R> Connect for Connector<T, R>
 where
-    T: Connect<Error=io::Error>,
+    T: Connect<Error = io::Error>,
     T: Clone,
     T: 'static,
     T::Transport: 'static,
     T::Future: 'static,
+    R: DnsResolver,
+    R: 'static,
 {
     type Transport = T::Transport;
     type Error = io::Error;
@@ -77,45 +87,40 @@ where
 
     fn connect(&self, dest: connect::Destination) -> Self::Future {
         debug!("original destination: {:?}", dest);
-        let dest = match self.resolve_dest(dest) {
-            Ok(dest) => dest,
-            Err(err) => {
-                let err = io::Error::new(io::ErrorKind::Other, err.to_string());
-                return Connecting(Box::new(future::err(err)));
-            },
-        };
-        debug!("resolved destination: {:?}", dest);
-        let connecting = self.http.connect(dest);
-        let fut = Box::new(connecting);
-        Connecting(fut)
-
-        /*
-        // async implementation
-        // compiles but hangs forever
-        println!("creating resolve");
-        let resolving = self.resolve_dest(&dest);
+        let resolving = self
+            .resolve_dest(dest)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
 
         let http = self.http.clone();
-        println!("chaining resolve");
-        let fut = Box::new(resolving.and_then(move |records| {
-            // unimplemented!()
-            println!("records: {:?}", records);
+        let fut = Box::new(resolving.and_then(move |dest| {
+            debug!("resolved destination: {:?}", dest);
             http.connect(dest)
         }));
-        println!("returning future");
+
         Connecting(fut)
-        */
     }
 }
 
-/// A Future representing work to connect to a URL
-pub struct Connecting<T>(
-    Box<Future<Item = (T, connect::Connected), Error = io::Error> + Send>,
-);
+/// A Future representing work to connect to a URL.
+#[must_use = "futures do nothing unless polled"]
+pub struct Connecting<T>(Box<Future<Item = (T, connect::Connected), Error = io::Error> + Send>);
 
 impl<T> Future for Connecting<T> {
     type Item = (T, connect::Connected);
     type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.0.poll()
+    }
+}
+
+/// A Future representing work to resolve a DNS query.
+#[must_use = "futures do nothing unless polled"]
+pub struct Resolving(Box<Future<Item = Destination, Error = Error> + Send>);
+
+impl Future for Resolving {
+    type Item = Destination;
+    type Error = Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.0.poll()

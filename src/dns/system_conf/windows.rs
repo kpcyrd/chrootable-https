@@ -2,7 +2,6 @@ use errors::*;
 use ipconfig::get_adapters;
 use std::net::SocketAddr;
 
-
 pub fn read_system_conf() -> Result<Vec<SocketAddr>> {
     let ns = get_adapters()?
         .iter()
