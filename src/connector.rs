@@ -1,5 +1,5 @@
 use ct_logs;
-use dns::{DnsResolver, RecordType};
+use crate::dns::{DnsResolver, RecordType};
 use futures::{future, Poll};
 use hyper::client::connect::Destination;
 use hyper::client::connect::HttpConnector;
@@ -9,9 +9,9 @@ use hyper_rustls::HttpsConnector;
 use rustls::ClientConfig;
 use webpki_roots;
 
-use errors::Error;
+use crate::errors::Error;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 pub struct Connector<T, R: DnsResolver> {
@@ -19,33 +19,53 @@ pub struct Connector<T, R: DnsResolver> {
     resolver: Arc<R>,
 }
 
+pub fn parse_ipaddr_hostname(host: &str) -> Option<&str> {
+    if host.starts_with('[') && host.ends_with(']') {
+        info!("hostname is an ipv6 addr, skip resolver");
+        Some(host)
+    } else if host.parse::<Ipv4Addr>().is_ok() {
+        info!("hostname is an ipv4 addr, skip resolver");
+        Some(host)
+    } else {
+        info!("hostname is a domain, continue to resolver");
+        None
+    }
+}
+
 impl<T, R: DnsResolver + 'static> Connector<T, R> {
     pub fn resolve_dest(&self, mut dest: Destination) -> Resolving {
-        let resolver = self.resolver.clone();
-        let host = dest.host().to_string();
+        if parse_ipaddr_hostname(dest.host()).is_some() {
+            let fut = Box::new(future::lazy(move || {
+                Ok(dest)
+            }));
+            Resolving(fut)
+        } else {
+            let resolver = self.resolver.clone();
+            let host = dest.host().to_string();
 
-        let resolve = future::lazy(move || {
-            resolver
-                .resolve(&host, RecordType::A)
-        });
+            let resolve = future::lazy(move || {
+                resolver
+                    .resolve(&host, RecordType::A)
+            });
 
-        let resolved = Box::new(resolve.and_then(move |record| {
-            // TODO: we might have more than one record available
-            match record.success()?.into_iter().next() {
-                Some(record) => {
-                    let ip = match record {
-                        IpAddr::V4(ip) => ip.to_string(),
-                        IpAddr::V6(ip) => format!("[{}]", ip),
-                    };
+            let resolved = Box::new(resolve.and_then(move |record| {
+                // TODO: we might have more than one record available
+                match record.success()?.into_iter().next() {
+                    Some(record) => {
+                        let ip = match record {
+                            IpAddr::V4(ip) => ip.to_string(),
+                            IpAddr::V6(ip) => format!("[{}]", ip),
+                        };
 
-                    dest.set_host(&ip)?;
-                    Ok(dest)
+                        dest.set_host(&ip)?;
+                        Ok(dest)
+                    }
+                    None => bail!("no record found"),
                 }
-                None => bail!("no record found"),
-            }
-        }));
+            }));
 
-        Resolving(resolved)
+            Resolving(resolved)
+        }
     }
 }
 
@@ -124,5 +144,28 @@ impl Future for Resolving {
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.0.poll()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_ipv4_skip_resolve() {
+        let x = parse_ipaddr_hostname("1.2.3.4");
+        assert_eq!(x, Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn verify_ipv6_skip_resolve() {
+        let x = parse_ipaddr_hostname("[::1]");
+        assert_eq!(x, Some("[::1]"));
+    }
+
+    #[test]
+    fn verify_domain_does_not_skip_resolve() {
+        let x = parse_ipaddr_hostname("example.com");
+        assert_eq!(x, None);
     }
 }
