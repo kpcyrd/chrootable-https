@@ -21,10 +21,13 @@ pub struct Connector<T, R: DnsResolver> {
 
 pub fn parse_ipaddr_hostname(host: &str) -> Option<&str> {
     if host.starts_with('[') && host.ends_with(']') {
+        info!("hostname is an ipv6 addr, skip resolver");
         Some(host)
     } else if host.parse::<Ipv4Addr>().is_ok() {
+        info!("hostname is an ipv4 addr, skip resolver");
         Some(host)
     } else {
+        info!("hostname is a domain, continue to resolver");
         None
     }
 }

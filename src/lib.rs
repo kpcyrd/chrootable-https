@@ -250,6 +250,18 @@ mod tests {
     }
 
     #[test]
+    fn verify_200_https_ipaddr() {
+        let resolver = Resolver::cloudflare();
+
+        let client = Client::new(resolver);
+        let reply = client
+            .get("http://1.1.1.1/")
+            .wait_for_response()
+            .expect("request failed");
+        assert_eq!(reply.status, 301);
+    }
+
+    #[test]
     fn verify_200_https_system_resolver() {
         let client = Client::with_system_resolver().expect("failed to create client");
         let reply = client
