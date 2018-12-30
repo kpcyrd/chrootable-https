@@ -15,16 +15,19 @@ pub enum ProxyDest {
 
 impl ProxyDest {
     fn apply_ipv4(buf: &mut Vec<u8>, addr: &Ipv4Addr) {
+        info!("Setting socks5 destination as ipv4: {:?}", addr);
         buf.push(0x01); // ipv4
         buf.extend(&addr.octets());
     }
 
     fn apply_ipv6(buf: &mut Vec<u8>, addr: &Ipv6Addr) {
+        info!("Setting socks5 destination as ipv6: {:?}", addr);
         buf.push(0x04); // ipv6
         buf.extend(&addr.octets());
     }
 
     fn apply_domain(buf: &mut Vec<u8>, domain: &str) {
+        info!("Setting socks5 destination as domain: {:?}", domain);
         let domain = domain.bytes();
         buf.push(0x03); // domain
         buf.push(domain.len() as u8);
@@ -72,10 +75,10 @@ impl Future for ConnectionFuture {
 
 /// A `Future` that will resolve to an tcp connection.
 #[must_use = "futures do nothing unless polled"]
-pub struct SkipFuture(Box<Future<Item = (TcpStream, u8), Error = io::Error> + Send>);
+pub struct SkipFuture(Box<Future<Item = (TcpStream, usize), Error = io::Error> + Send>);
 
 impl Future for SkipFuture {
-    type Item = (TcpStream, u8);
+    type Item = (TcpStream, usize);
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
@@ -88,6 +91,8 @@ fn err<T: 'static + Send>(msg: &str) -> Box<Future<Item = T, Error = io::Error> 
 }
 
 fn socks5_request_connect(stream: TcpStream, buf: Vec<u8>, dest: &ProxyDest, port: u16) -> ConnectionFuture {
+    info!("Reading socks5 server hello");
+
     // version
     if buf[0] != 0x05 {
         return ConnectionFuture(err("wrong version"));
@@ -98,6 +103,8 @@ fn socks5_request_connect(stream: TcpStream, buf: Vec<u8>, dest: &ProxyDest, por
         return ConnectionFuture(err("auth failed"));
     }
 
+    info!("Socks5 authentication successful");
+
     let mut buf = vec![
         0x05, // version
         0x01, // tcp connect
@@ -106,6 +113,7 @@ fn socks5_request_connect(stream: TcpStream, buf: Vec<u8>, dest: &ProxyDest, por
 
     dest.apply(&mut buf);
     buf.write_u16::<NetworkEndian>(port).unwrap();
+    info!("Sending connect request");
     let fut = tokio::io::write_all(stream, buf)
         .and_then(|(stream, _)| future::ok(stream));
     ConnectionFuture(Box::new(fut))
@@ -114,6 +122,7 @@ fn socks5_request_connect(stream: TcpStream, buf: Vec<u8>, dest: &ProxyDest, por
 pub fn connect(addr: &SocketAddr, dest: ProxyDest, port: u16) -> ConnectionFuture {
     let fut = TcpStream::connect(&addr)
         .and_then(|stream| {
+            info!("Sending socks5 hello");
             tokio::io::write_all(stream, &[
                 0x05, // version
                 0x01, // number of supported auths
@@ -130,6 +139,8 @@ pub fn connect(addr: &SocketAddr, dest: ProxyDest, port: u16) -> ConnectionFutur
             tokio::io::read_exact(stream, buf)
         })
         .and_then(|(stream, buf)| {
+            info!("Reading connect response");
+
             // version
             if buf[0] != 0x05 {
                 return SkipFuture(err("wrong version"));
@@ -151,26 +162,28 @@ pub fn connect(addr: &SocketAddr, dest: ProxyDest, port: u16) -> ConnectionFutur
             if buf[2] != 0x00 {
                 return SkipFuture(err("wrong reserved bytes"));
             }
+            info!("Connection successful");
 
             match buf[3] {
-                0x01 => SkipFuture(Box::new(future::ok((stream, 6)))), // ipv4 + 2
+                0x01 => SkipFuture(Box::new(future::ok((stream, 4)))), // ipv4
                 0x03 => {
                     let buf = vec![0; 1];
                     let fut = tokio::io::read_exact(stream, buf)
                         .and_then(|(stream, buf)| {
-                            Ok((stream, buf[0] + 2))
+                            Ok((stream, buf[0] as usize))
                         });
                     SkipFuture(Box::new(fut))
                 },
-                0x04 => SkipFuture(Box::new(future::ok((stream, 18)))), // ipv6 + 2
+                0x04 => SkipFuture(Box::new(future::ok((stream, 16)))), // ipv6
                 _ => SkipFuture(err("wrong address type")),
             }
         })
         .and_then(|(stream, n)| {
-            let buf = vec![0; n as usize];
+            let buf = vec![0; n + 2];
             tokio::io::read_exact(stream, buf)
         })
         .and_then(|(stream, _)| {
+            info!("Socks5 tunnel established");
             future::ok(stream)
         });
     ConnectionFuture(Box::new(fut))
