@@ -41,11 +41,13 @@ use tokio::runtime::Runtime;
 
 pub use http::Uri;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 mod connector;
 pub mod dns;
+pub mod socks5;
 use self::connector::Connector;
 pub use crate::dns::{DnsResolver, RecordType, Resolver};
 
@@ -69,7 +71,8 @@ impl<R: DnsResolver + 'static> Client<R> {
     ///
     /// This bypasses `/etc/resolv.conf`.
     pub fn new(resolver: R) -> Client<R> {
-        let https = Connector::https(Arc::new(resolver));
+        let https = Connector::new(Arc::new(resolver))
+            .with_https();
         let client = hyper::Client::builder()
             .keep_alive(false)
             .build::<_, hyper::Body>(https);
@@ -109,6 +112,22 @@ impl Client<Resolver> {
     pub fn with_system_resolver() -> Result<Client<Resolver>> {
         let resolver = Resolver::from_system()?;
         Ok(Client::new(resolver))
+    }
+
+    /// Create a new client that is locked to a socks5 proxy
+    pub fn with_socks5(proxy: SocketAddr) -> Client<Resolver> {
+        let resolver = Resolver::empty();
+        let https = Connector::new(Arc::new(resolver))
+            .with_socks5(proxy)
+            .with_https();
+        let client = hyper::Client::builder()
+            .keep_alive(false)
+            .build::<_, hyper::Body>(https);
+
+        Client {
+            client: Arc::new(client),
+            timeout: None,
+        }
     }
 }
 

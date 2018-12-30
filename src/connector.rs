@@ -1,21 +1,25 @@
 use ct_logs;
 use crate::dns::{DnsResolver, RecordType};
+use crate::socks5::{self, ProxyDest};
 use futures::{future, Poll};
 use hyper::client::connect::Destination;
 use hyper::client::connect::HttpConnector;
-use hyper::client::connect::{self, Connect};
+use hyper::client::connect::{self, Connect, Connected};
 use hyper::rt::Future;
 use hyper_rustls::HttpsConnector;
 use rustls::ClientConfig;
+use tokio::net::TcpStream;
 use webpki_roots;
 
 use crate::errors::Error;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub struct Connector<T, R: DnsResolver> {
     http: T,
+    proxy: Option<SocketAddr>,
     resolver: Arc<R>,
 }
 
@@ -35,18 +39,14 @@ pub fn parse_ipaddr_hostname(host: &str) -> Option<&str> {
 impl<T, R: DnsResolver + 'static> Connector<T, R> {
     pub fn resolve_dest(&self, mut dest: Destination) -> Resolving {
         if parse_ipaddr_hostname(dest.host()).is_some() {
-            let fut = Box::new(future::lazy(move || {
-                Ok(dest)
-            }));
+            let fut = Box::new(future::ok(dest));
             Resolving(fut)
         } else {
             let resolver = self.resolver.clone();
             let host = dest.host().to_string();
 
-            let resolve = future::lazy(move || {
-                resolver
-                    .resolve(&host, RecordType::A)
-            });
+            let resolve = resolver
+                .resolve(&host, RecordType::A);
 
             let resolved = Box::new(resolve.and_then(move |record| {
                 // TODO: we might have more than one record available
@@ -73,51 +73,63 @@ impl<R: DnsResolver> Connector<HttpConnector, R> {
     pub fn new(resolver: Arc<R>) -> Connector<HttpConnector, R> {
         let mut http = HttpConnector::new(4);
         http.enforce_http(false);
-        Connector { http, resolver }
+        Connector {
+            http,
+            resolver,
+            proxy: None,
+        }
     }
 
-    pub fn https(
-        resolver: Arc<R>,
-    ) -> HttpsConnector<Connector<HttpConnector, R>> {
-        let http = Connector::new(resolver);
+    pub fn with_socks5(mut self, proxy: SocketAddr) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
 
+    pub fn with_https(self) -> HttpsConnector<Connector<HttpConnector, R>> {
         let mut config = ClientConfig::new();
         config
             .root_store
             .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
         config.ct_logs = Some(&ct_logs::LOGS);
 
-        HttpsConnector::from((http, config))
+        HttpsConnector::from((self, config))
     }
 }
 
-impl<T, R> Connect for Connector<T, R>
+impl<R> Connect for Connector<HttpConnector, R>
 where
-    T: Connect<Error = io::Error>,
-    T: Clone,
-    T: 'static,
-    T::Transport: 'static,
-    T::Future: 'static,
     R: DnsResolver,
     R: 'static,
 {
-    type Transport = T::Transport;
+    type Transport = TcpStream;
     type Error = io::Error;
-    type Future = Connecting<T::Transport>;
+    type Future = Connecting<TcpStream>;
 
     fn connect(&self, dest: connect::Destination) -> Self::Future {
-        debug!("original destination: {:?}", dest);
-        let resolving = self
-            .resolve_dest(dest)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+        match &self.proxy {
+            Some(proxy) => {
+                let (dest, port) = ProxyDest::from_hyper(dest);
+                let fut = socks5::connect(proxy, dest, port)
+                    .and_then(|stream| {
+                        future::ok((stream, Connected::new()))
+                    });
+                Connecting(Box::new(fut))
+            },
+            None => {
+                debug!("original destination: {:?}", dest);
+                let resolving = self
+                    .resolve_dest(dest)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
 
-        let http = self.http.clone();
-        let fut = Box::new(resolving.and_then(move |dest| {
-            debug!("resolved destination: {:?}", dest);
-            http.connect(dest)
-        }));
+                let http = self.http.clone();
+                let fut = resolving.and_then(move |dest| {
+                    debug!("resolved destination: {:?}", dest);
+                    http.connect(dest)
+                });
 
-        Connecting(fut)
+                Connecting(Box::new(fut))
+            },
+        }
     }
 }
 

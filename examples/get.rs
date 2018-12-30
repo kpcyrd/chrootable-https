@@ -5,6 +5,7 @@ extern crate structopt;
 use chrootable_https::{Client, Resolver};
 use std::io;
 use std::io::prelude::*;
+use std::net::SocketAddr;
 use std::time::Duration;
 use structopt::StructOpt;
 
@@ -13,15 +14,21 @@ pub struct Args {
     #[structopt(short = "-t", long = "--timeout")]
     timeout: Option<u64>,
     urls: Vec<String>,
+    #[structopt(long = "--socks5")]
+    socks5: Option<SocketAddr>,
 }
 
 fn main() {
     env_logger::init();
     let args = Args::from_args();
 
-    let resolver = Resolver::cloudflare();
+    let mut client = if let Some(proxy) = args.socks5 {
+        Client::with_socks5(proxy)
+    } else {
+        let resolver = Resolver::cloudflare();
+        Client::new(resolver)
+    };
 
-    let mut client = Client::new(resolver);
     if let Some(timeout) = args.timeout {
         client.timeout(Duration::from_millis(timeout));
     }

@@ -142,6 +142,15 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    /// Build a resolver with no nameservers
+    pub fn empty() -> Resolver {
+        Resolver {
+            ns: vec![],
+            tcp: false,
+            timeout: None,
+        }
+    }
+
     /// Creates a new resolver using the [CloudFlare Authoritative DNS][cf] service.
     ///
     /// [cf]: https://www.cloudflare.com/learning/dns/what-is-1.1.1.1/
