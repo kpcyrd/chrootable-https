@@ -1,4 +1,5 @@
 use ct_logs;
+use crate::cache::DnsCache;
 use crate::dns::{DnsResolver, RecordType};
 use crate::socks5::{self, ProxyDest};
 use futures::{future, Poll};
@@ -15,12 +16,15 @@ use crate::errors::Error;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 
 pub struct Connector<T, R: DnsResolver> {
     http: T,
     proxy: Option<SocketAddr>,
     resolver: Arc<R>,
+    cache: Arc<Mutex<DnsCache>>,
 }
 
 pub fn parse_ipaddr_hostname(host: &str) -> Option<&str> {
@@ -37,20 +41,55 @@ pub fn parse_ipaddr_hostname(host: &str) -> Option<&str> {
 }
 
 impl<T, R: DnsResolver + 'static> Connector<T, R> {
+    pub fn get_cache(&self, host: &str) -> Option<Option<IpAddr>> {
+        let mut cache = self.cache.lock().unwrap();
+        cache.get(host, Instant::now())
+    }
+
+    pub fn insert_cache(cache: Arc<Mutex<DnsCache>>, host: String, ipaddr: Option<IpAddr>, ttl: Duration) {
+        let mut cache = cache.lock().unwrap();
+        cache.insert(host, ipaddr, ttl, Instant::now());
+    }
+
     pub fn resolve_dest(&self, mut dest: Destination) -> Resolving {
         if parse_ipaddr_hostname(dest.host()).is_some() {
             let fut = Box::new(future::ok(dest));
             Resolving(fut)
+        } else if let Some(record) = self.get_cache(dest.host()) {
+            if let Some(record) = record {
+                let ip = match record {
+                    IpAddr::V4(ip) => ip.to_string(),
+                    IpAddr::V6(ip) => format!("[{}]", ip),
+                };
+
+                match dest.set_host(&ip) {
+                    Ok(_) => {
+                        let fut = Box::new(future::ok(dest));
+                        Resolving(fut)
+                    },
+                    Err(err) => {
+                        let fut = Box::new(future::err(err.into()));
+                        Resolving(fut)
+                    },
+                }
+            } else {
+                let fut = Box::new(future::err(format_err!("dns cache has a negative ttl")));
+                Resolving(fut)
+            }
         } else {
             let resolver = self.resolver.clone();
+            let cache = self.cache.clone();
             let host = dest.host().to_string();
 
             let resolve = resolver
                 .resolve(&host, RecordType::A);
 
-            let resolved = Box::new(resolve.and_then(move |record| {
+            let resolved = Box::new(resolve.and_then(move |reply| {
                 // TODO: we might have more than one record available
-                match record.success()?.into_iter().next() {
+                let record = reply.success()?.into_iter().next();
+                Self::insert_cache(cache, host, record, reply.ttl());
+
+                match record {
                     Some(record) => {
                         let ip = match record {
                             IpAddr::V4(ip) => ip.to_string(),
@@ -75,8 +114,9 @@ impl<R: DnsResolver> Connector<HttpConnector, R> {
         http.enforce_http(false);
         Connector {
             http,
-            resolver,
             proxy: None,
+            resolver,
+            cache: Arc::new(Mutex::new(DnsCache::default())),
         }
     }
 

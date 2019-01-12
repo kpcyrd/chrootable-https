@@ -212,7 +212,8 @@ impl Resolver {
                 .map(|x| {
                     let name = dns_name_to_string(x.name())?;
                     let rdata = x.rdata().into();
-                    Ok((name, rdata))
+                    let ttl = x.ttl();
+                    Ok((name, rdata, ttl))
                 }).collect::<Result<Vec<_>>>()?;
 
             Ok(DnsReply { answers, error })
@@ -250,7 +251,7 @@ impl DnsResolver for Resolver {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct DnsReply {
-    pub answers: Vec<(String, RData)>,
+    pub answers: Vec<(String, RData, u32)>,
     pub error: Option<DnsError>,
 }
 
@@ -270,6 +271,22 @@ impl DnsReply {
             }).collect();
 
         Ok(ips)
+    }
+
+    pub fn ttl(&self) -> Duration {
+        let ttl = if self.error.is_none() {
+            self.answers.iter()
+                .map(|(_, _, ttl)| *ttl)
+                .min()
+        } else {
+            self.answers.iter()
+                .filter_map(|x| match x {
+                    (_, RData::SOA(soa), _) => Some(soa.minimum),
+                    _ => None,
+                })
+                .next()
+        };
+        Duration::from_secs(ttl.unwrap_or(0) as u64)
     }
 }
 

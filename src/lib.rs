@@ -45,6 +45,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub mod cache;
 mod connector;
 pub mod dns;
 pub mod socks5;
