@@ -42,7 +42,6 @@ use tokio::runtime::Runtime;
 pub use http::Uri;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 pub mod cache;
@@ -63,8 +62,7 @@ pub use crate::errors::*;
 /// Uses an specific DNS resolver.
 #[derive(Debug)]
 pub struct Client<R: DnsResolver> {
-    client: Arc<hyper::Client<HttpsConnector<Connector<HttpConnector, R>>>>,
-    timeout: Option<Duration>,
+    client: hyper::Client<HttpsConnector<Connector<HttpConnector, R>>>,
 }
 
 impl<R: DnsResolver + 'static> Client<R> {
@@ -72,21 +70,15 @@ impl<R: DnsResolver + 'static> Client<R> {
     ///
     /// This bypasses `/etc/resolv.conf`.
     pub fn new(resolver: R) -> Client<R> {
-        let https = Connector::new(Arc::new(resolver))
+        let https = Connector::new(resolver)
             .with_https();
         let client = hyper::Client::builder()
             .keep_alive(false)
             .build::<_, hyper::Body>(https);
 
         Client {
-            client: Arc::new(client),
-            timeout: None,
+            client,
         }
-    }
-
-    /// Set a timeout (default setting is no timeout).
-    pub fn timeout(&mut self, timeout: Duration) {
-        self.timeout = Some(timeout);
     }
 
     /// Shorthand function to do a GET request with [`HttpClient::request`].
@@ -118,7 +110,7 @@ impl Client<Resolver> {
     /// Create a new client that is locked to a socks5 proxy
     pub fn with_socks5(proxy: SocketAddr) -> Client<Resolver> {
         let resolver = Resolver::empty();
-        let https = Connector::new(Arc::new(resolver))
+        let https = Connector::new(resolver)
             .with_socks5(proxy)
             .with_https();
         let client = hyper::Client::builder()
@@ -126,8 +118,7 @@ impl Client<Resolver> {
             .build::<_, hyper::Body>(https);
 
         Client {
-            client: Arc::new(client),
-            timeout: None,
+            client,
         }
     }
 }
@@ -140,7 +131,6 @@ pub trait HttpClient {
 impl<R: DnsResolver + 'static> HttpClient for Client<R> {
     fn request(&self, request: Request<hyper::Body>) -> ResponseFuture {
         let client = self.client.clone();
-        let timeout = self.timeout.clone();
 
         info!("sending request to {:?}", request.uri());
         let fut = client.request(request).map_err(Error::from)
@@ -149,12 +139,7 @@ impl<R: DnsResolver + 'static> HttpClient for Client<R> {
                 let (parts, body) = res.into_parts();
                 let body = body.concat2().map_err(Error::from);
                 (future::ok(parts), body)
-            }).map_err(|e| e.compat());
-
-        let fut: Box<Future<Item = _, Error = Error> + Send> = match timeout {
-            Some(timeout) => Box::new(fut.timeout(timeout).map_err(Error::from)),
-            None => Box::new(fut.map_err(Error::from)),
-        };
+            }).map_err(Error::from);
 
         let reply = fut.and_then(|(parts, body)| {
             let body = body.into_bytes();
@@ -178,6 +163,21 @@ impl ResponseFuture {
         F: Future<Item = Response, Error = Error> + Send + 'static,
     {
         ResponseFuture(Box::new(inner))
+    }
+
+    /// Set a timeout (default setting is no timeout).
+    pub fn with_timeout(self, timeout: Option<Duration>) -> Self {
+        match timeout {
+            Some(timeout) => {
+                let fut = self.timeout(timeout)
+                    .map_err(|err| match err.into_inner() {
+                        Some(err) => err,
+                        _ => format_err!("Request timed out"),
+                    });
+                ResponseFuture(Box::new(fut))
+            },
+            _ => self,
+        }
     }
 
     /// Drives this future to completion, eventually returning an HTTP response.
@@ -306,12 +306,12 @@ mod tests {
     #[test]
     fn verify_timeout() {
         let resolver = Resolver::cloudflare();
-
-        let mut client = Client::new(resolver);
-        client.timeout(Duration::from_millis(250));
+        let client = Client::new(resolver);
 
         let start = Instant::now();
-        let _reply = client.get("http://1.2.3.4").wait_for_response().err();
+        let _reply = client.get("http://1.2.3.4")
+            .with_timeout(Some(Duration::from_millis(250)))
+            .wait_for_response().err();
         let end = Instant::now();
 
         assert!(end.duration_since(start) < Duration::from_secs(1));

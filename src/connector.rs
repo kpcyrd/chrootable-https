@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 pub struct Connector<T, R: DnsResolver> {
     http: T,
     proxy: Option<SocketAddr>,
-    resolver: Arc<R>,
+    resolver: R,
     cache: Arc<Mutex<DnsCache>>,
 }
 
@@ -77,11 +77,10 @@ impl<T, R: DnsResolver + 'static> Connector<T, R> {
                 Resolving(fut)
             }
         } else {
-            let resolver = self.resolver.clone();
             let cache = self.cache.clone();
             let host = dest.host().to_string();
 
-            let resolve = resolver
+            let resolve = self.resolver
                 .resolve(&host, RecordType::A);
 
             let resolved = Box::new(resolve.and_then(move |reply| {
@@ -109,7 +108,7 @@ impl<T, R: DnsResolver + 'static> Connector<T, R> {
 }
 
 impl<R: DnsResolver> Connector<HttpConnector, R> {
-    pub fn new(resolver: Arc<R>) -> Connector<HttpConnector, R> {
+    pub fn new(resolver: R) -> Connector<HttpConnector, R> {
         let mut http = HttpConnector::new(4);
         http.enforce_http(false);
         Connector {
