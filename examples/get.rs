@@ -22,20 +22,19 @@ fn main() {
     env_logger::init();
     let args = Args::from_args();
 
-    let mut client = if let Some(proxy) = args.socks5 {
+    let client = if let Some(proxy) = args.socks5 {
         Client::with_socks5(proxy)
     } else {
         let resolver = Resolver::cloudflare();
         Client::new(resolver)
     };
 
-    if let Some(timeout) = args.timeout {
-        client.timeout(Duration::from_millis(timeout));
-    }
+    let timeout = args.timeout.map(Duration::from_millis);
 
     for url in &args.urls {
         let reply = client
             .get(&url)
+            .with_timeout(timeout)
             .wait_for_response()
             .expect("request failed");
         eprintln!("{:#?}", reply);
