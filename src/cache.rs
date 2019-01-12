@@ -100,3 +100,36 @@ impl Default for DnsCache {
         DnsCache::new(32, TtlConfig::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn verify_insert() {
+        let now = Instant::now();
+        let mut cache = DnsCache::default();
+        let ipaddr = "1.1.1.1".parse().unwrap();
+        cache.insert("example.com".into(), Some(ipaddr), Duration::from_secs(1), now);
+    }
+
+    #[test]
+    fn verify_get() {
+        let now = Instant::now();
+        let mut cache = DnsCache::default();
+        let ipaddr = "1.1.1.1".parse().unwrap();
+        cache.insert("example.com".into(), Some(ipaddr), Duration::from_secs(1), now);
+        assert!(cache.get("example.com", now).is_some());
+    }
+
+    #[test]
+    fn verify_expire() {
+        let now = Instant::now();
+        let mut cache = DnsCache::default();
+        let ipaddr = "1.1.1.1".parse().unwrap();
+        cache.insert("example.com".into(), Some(ipaddr), Duration::from_secs(1), now);
+        let now = now + Duration::from_secs(2);
+        assert!(cache.get("example.com", now).is_none());
+    }
+}
