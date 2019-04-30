@@ -15,7 +15,7 @@ travis-ci = { repository = "kpcyrd/chrootable-https" }
 failure = "0.1.1"
 log = "0.4"
 
-trust-dns = "0.15"
+trust-dns = "0.16"
 lru-cache = "0.1.1"
 
 serde = "1.0"
