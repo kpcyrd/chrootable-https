@@ -162,9 +162,9 @@ impl Resolver {
         }
     }
     
-    /// Creates a new resolver using the [Google Public DNS][cf] service.
+    /// Creates a new resolver using the [Google Public DNS][ggl] service.
     ///
-    /// [cf]: https://developers.google.com/speed/public-dns/
+    /// [ggl]: https://developers.google.com/speed/public-dns/
     pub fn google() -> Resolver {
         Resolver {
             ns: vec!["8.8.8.8:53".parse().unwrap(), "8.8.4.4:53".parse().unwrap()],
