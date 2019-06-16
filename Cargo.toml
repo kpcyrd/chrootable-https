@@ -36,7 +36,7 @@ webpki-roots = "0.16"
 resolv-conf = { version = "0.6.0", features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
-ipconfig = "0.1.7"
+ipconfig = "0.2"
 
 [dev-dependencies]
 env_logger = "0.6"
