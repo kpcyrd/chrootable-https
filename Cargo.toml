@@ -25,12 +25,12 @@ hyper = "0.12"
 http = "0.1.5"
 bytes = "0.4"
 byteorder = "1.2"
-hyper-rustls = "0.16"
-rustls = "0.15"
+hyper-rustls = "0.17"
+rustls = "0.16"
 tokio = "0.1.8"
 futures = "0.1"
-ct-logs = "0.5"
-webpki-roots = "0.16"
+ct-logs = "0.6"
+webpki-roots = "0.17"
 
 [target.'cfg(unix)'.dependencies]
 resolv-conf = { version = "0.6.0", features = ["system"] }
