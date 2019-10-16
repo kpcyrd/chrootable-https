@@ -1,5 +1,5 @@
 use ct_logs;
-use crate::cache::DnsCache;
+use crate::cache::{self, DnsCache};
 use crate::dns::{DnsResolver, RecordType};
 use crate::socks5::{self, ProxyDest};
 use futures::{future, Poll};
@@ -41,11 +41,13 @@ pub fn parse_ipaddr_hostname(host: &str) -> Option<&str> {
 }
 
 impl<T, R: DnsResolver + 'static> Connector<T, R> {
-    pub fn get_cache(&self, host: &str) -> Option<Option<IpAddr>> {
+    #[inline]
+    pub fn get_cache(&self, host: &str) -> cache::Value {
         let mut cache = self.cache.lock().unwrap();
         cache.get(host, Instant::now())
     }
 
+    #[inline]
     pub fn insert_cache(cache: Arc<Mutex<DnsCache>>, host: String, ipaddr: Option<IpAddr>, ttl: Duration) {
         let mut cache = cache.lock().unwrap();
         cache.insert(host, ipaddr, ttl, Instant::now());
@@ -54,14 +56,15 @@ impl<T, R: DnsResolver + 'static> Connector<T, R> {
     pub fn resolve_dest(&self, mut dest: Destination) -> Resolving {
         if parse_ipaddr_hostname(dest.host()).is_some() {
             let fut = Box::new(future::ok(dest));
-            Resolving(fut)
-        } else if let Some(record) = self.get_cache(dest.host()) {
-            if let Some(record) = record {
+            return Resolving(fut);
+        }
+
+        match self.get_cache(dest.host()) {
+            cache::Value::Some(record) => {
                 let ip = match record {
                     IpAddr::V4(ip) => ip.to_string(),
                     IpAddr::V6(ip) => format!("[{}]", ip),
                 };
-
                 match dest.set_host(&ip) {
                     Ok(_) => {
                         let fut = Box::new(future::ok(dest));
@@ -72,37 +75,39 @@ impl<T, R: DnsResolver + 'static> Connector<T, R> {
                         Resolving(fut)
                     },
                 }
-            } else {
+            },
+            cache::Value::NX => {
                 let fut = Box::new(future::err(format_err!("dns cache has a negative ttl")));
                 Resolving(fut)
-            }
-        } else {
-            let cache = self.cache.clone();
-            let host = dest.host().to_string();
+            },
+            cache::Value::None => {
+                let cache = self.cache.clone();
+                let host = dest.host().to_string();
 
-            let resolve = self.resolver
-                .resolve(&host, RecordType::A);
+                let resolve = self.resolver
+                    .resolve(&host, RecordType::A);
 
-            let resolved = Box::new(resolve.and_then(move |reply| {
-                // TODO: we might have more than one record available
-                let record = reply.success()?.into_iter().next();
-                Self::insert_cache(cache, host, record, reply.ttl());
+                let resolved = Box::new(resolve.and_then(move |reply| {
+                    // TODO: we might have more than one record available
+                    let record = reply.success()?.into_iter().next();
+                    Self::insert_cache(cache, host, record, reply.ttl());
 
-                match record {
-                    Some(record) => {
-                        let ip = match record {
-                            IpAddr::V4(ip) => ip.to_string(),
-                            IpAddr::V6(ip) => format!("[{}]", ip),
-                        };
+                    match record {
+                        Some(record) => {
+                            let ip = match record {
+                                IpAddr::V4(ip) => ip.to_string(),
+                                IpAddr::V6(ip) => format!("[{}]", ip),
+                            };
 
-                        dest.set_host(&ip)?;
-                        Ok(dest)
+                            dest.set_host(&ip)?;
+                            Ok(dest)
+                        }
+                        None => bail!("no record found"),
                     }
-                    None => bail!("no record found"),
-                }
-            }));
+                }));
 
-            Resolving(resolved)
+                Resolving(resolved)
+            },
         }
     }
 }
@@ -137,8 +142,7 @@ impl<R: DnsResolver> Connector<HttpConnector, R> {
 
 impl<R> Connect for Connector<HttpConnector, R>
 where
-    R: DnsResolver,
-    R: 'static,
+    R: DnsResolver + 'static,
 {
     type Transport = TcpStream;
     type Error = io::Error;
@@ -174,7 +178,7 @@ where
 
 /// A Future representing work to connect to a URL.
 #[must_use = "futures do nothing unless polled"]
-pub struct Connecting<T>(Box<Future<Item = (T, connect::Connected), Error = io::Error> + Send>);
+pub struct Connecting<T>(Box<dyn Future<Item = (T, connect::Connected), Error = io::Error> + Send>);
 
 impl<T> Future for Connecting<T> {
     type Item = (T, connect::Connected);
@@ -187,7 +191,7 @@ impl<T> Future for Connecting<T> {
 
 /// A Future representing work to resolve a DNS query.
 #[must_use = "futures do nothing unless polled"]
-pub struct Resolving(Box<Future<Item = Destination, Error = Error> + Send>);
+pub struct Resolving(Box<dyn Future<Item = Destination, Error = Error> + Send>);
 
 impl Future for Resolving {
     type Item = Destination;

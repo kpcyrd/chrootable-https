@@ -154,7 +154,7 @@ impl<R: DnsResolver + 'static> HttpClient for Client<R> {
 
 /// A `Future` that will resolve to an HTTP Response.
 #[must_use = "futures do nothing unless polled"]
-pub struct ResponseFuture(Box<Future<Item = Response, Error = Error> + Send>);
+pub struct ResponseFuture(Box<dyn Future<Item = Response, Error = Error> + Send>);
 
 impl ResponseFuture {
     /// Creates a new `ResponseFuture`.

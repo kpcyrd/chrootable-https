@@ -14,13 +14,13 @@ pub enum ProxyDest {
 }
 
 impl ProxyDest {
-    fn apply_ipv4(buf: &mut Vec<u8>, addr: &Ipv4Addr) {
+    fn apply_ipv4(buf: &mut Vec<u8>, addr: Ipv4Addr) {
         info!("Setting socks5 destination as ipv4: {:?}", addr);
         buf.push(0x01); // ipv4
         buf.extend(&addr.octets());
     }
 
-    fn apply_ipv6(buf: &mut Vec<u8>, addr: &Ipv6Addr) {
+    fn apply_ipv6(buf: &mut Vec<u8>, addr: Ipv6Addr) {
         info!("Setting socks5 destination as ipv6: {:?}", addr);
         buf.push(0x04); // ipv6
         buf.extend(&addr.octets());
@@ -36,8 +36,8 @@ impl ProxyDest {
 
     fn apply(&self, buf: &mut Vec<u8>) {
         match self {
-            ProxyDest::Ipv4Addr(addr) => Self::apply_ipv4(buf, addr),
-            ProxyDest::Ipv6Addr(addr) => Self::apply_ipv6(buf, addr),
+            ProxyDest::Ipv4Addr(addr) => Self::apply_ipv4(buf, *addr),
+            ProxyDest::Ipv6Addr(addr) => Self::apply_ipv6(buf, *addr),
             ProxyDest::Domain(domain) => Self::apply_domain(buf, domain),
         }
     }
@@ -62,7 +62,7 @@ impl ProxyDest {
 
 /// A `Future` that will resolve to an tcp connection.
 #[must_use = "futures do nothing unless polled"]
-pub struct ConnectionFuture(Box<Future<Item = TcpStream, Error = io::Error> + Send>);
+pub struct ConnectionFuture(Box<dyn Future<Item = TcpStream, Error = io::Error> + Send>);
 
 impl Future for ConnectionFuture {
     type Item = TcpStream;
@@ -75,7 +75,7 @@ impl Future for ConnectionFuture {
 
 /// A `Future` that will resolve to an tcp connection.
 #[must_use = "futures do nothing unless polled"]
-pub struct SkipFuture(Box<Future<Item = (TcpStream, usize), Error = io::Error> + Send>);
+pub struct SkipFuture(Box<dyn Future<Item = (TcpStream, usize), Error = io::Error> + Send>);
 
 impl Future for SkipFuture {
     type Item = (TcpStream, usize);
@@ -86,7 +86,7 @@ impl Future for SkipFuture {
     }
 }
 
-fn err<T: 'static + Send>(msg: &str) -> Box<Future<Item = T, Error = io::Error> + Send> {
+fn err<T: 'static + Send>(msg: &str) -> Box<dyn Future<Item = T, Error = io::Error> + Send> {
     Box::new(future::err(io::Error::new(io::ErrorKind::InvalidData, msg)))
 }
 
