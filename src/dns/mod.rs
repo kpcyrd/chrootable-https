@@ -33,7 +33,7 @@ pub enum DnsError {
 }
 
 impl DnsError {
-    fn from_response_code(code: &ResponseCode) -> Option<DnsError> {
+    fn from_response_code(code: ResponseCode) -> Option<DnsError> {
         use trust_dns::op::ResponseCode::*;
         match code {
             NoError => None,
@@ -78,8 +78,8 @@ impl<'a> From<&'a record_data::RData> for RData {
     fn from(rdata: &'a record_data::RData) -> RData {
         use trust_dns::rr::record_data::RData::*;
         match rdata {
-            A(ip) => RData::A(ip.clone()),
-            AAAA(ip) => RData::AAAA(ip.clone()),
+            A(ip) => RData::A(*ip),
+            AAAA(ip) => RData::AAAA(*ip),
             CNAME(name) => RData::CNAME(name.to_string()),
             MX(mx) => RData::MX((mx.preference(), mx.exchange().to_string())),
             NS(ns) => RData::NS(ns.to_string()),
@@ -206,7 +206,7 @@ impl Resolver {
                 .map_err(Error::from)
         });
 
-        let response: Box<Future<Item = _, Error = _> + Send> = match self.timeout {
+        let response: Box<dyn Future<Item = _, Error = _> + Send> = match self.timeout {
             Some(ref timeout) => Box::new(query.timeout(*timeout).map_err(|e| {
                 e.into_inner()
                     .unwrap_or_else(|| format_err!("DNS query timed out"))
@@ -215,7 +215,7 @@ impl Resolver {
         };
 
         let reply = response.and_then(|response| {
-            let error = DnsError::from_response_code(&response.response_code());
+            let error = DnsError::from_response_code(response.response_code());
 
             let answers = response
                 .answers()
@@ -249,12 +249,12 @@ impl DnsResolver for Resolver {
         if self.tcp {
             match TcpClientConnection::new(*address) {
                 Ok(conn) => self.resolve_with(conn, name, query_type),
-                Err(e) => return Resolving::new(future::err(e.into())),
+                Err(e) => Resolving::new(future::err(e.into())),
             }
         } else {
             match UdpClientConnection::new(*address) {
                 Ok(conn) => self.resolve_with(conn, name, query_type),
-                Err(e) => return Resolving::new(future::err(e.into())),
+                Err(e) => Resolving::new(future::err(e.into())),
             }
         }
     }
@@ -276,8 +276,8 @@ impl DnsReply {
             .answers
             .iter()
             .flat_map(|x| match x.1 {
-                RData::A(ip) => Some(IpAddr::V4(ip.clone())),
-                RData::AAAA(ip) => Some(IpAddr::V6(ip.clone())),
+                RData::A(ip) => Some(IpAddr::V4(ip)),
+                RData::AAAA(ip) => Some(IpAddr::V6(ip)),
                 _ => None,
             }).collect();
 
@@ -297,13 +297,13 @@ impl DnsReply {
                 })
                 .next()
         };
-        Duration::from_secs(ttl.unwrap_or(0) as u64)
+        Duration::from_secs(u64::from(ttl.unwrap_or(0)))
     }
 }
 
 /// A `Future` that represents a resolving DNS query.
 #[must_use = "futures do nothing unless polled"]
-pub struct Resolving(Box<Future<Item = DnsReply, Error = Error> + Send>);
+pub struct Resolving(Box<dyn Future<Item = DnsReply, Error = Error> + Send>);
 
 impl Resolving {
     /// Creates a new `Resolving` future.

@@ -15,9 +15,16 @@ struct LruValue {
 }
 
 impl LruValue {
-    fn is_current(&self, now: Instant) -> bool {
+    fn is_fresh(&self, now: Instant) -> bool {
         now <= self.valid_until
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Value {
+    None,
+    NX,
+    Some(IpAddr),
 }
 
 pub struct TtlConfig {
@@ -61,16 +68,14 @@ impl DnsCache {
     pub fn insert(&mut self, query: String, ipaddr: Option<IpAddr>, mut ttl: Duration, now: Instant) {
         if ipaddr.is_some() {
             if ttl < self.positive_min_ttl {
-                ttl = self.positive_min_ttl.clone();
+                ttl = self.positive_min_ttl;
             } else if ttl > self.positive_max_ttl {
-                ttl = self.positive_max_ttl.clone();
+                ttl = self.positive_max_ttl;
             }
-        } else {
-            if ttl < self.negative_min_ttl {
-                ttl = self.negative_min_ttl.clone();
-            } else if ttl > self.negative_max_ttl {
-                ttl = self.negative_max_ttl.clone();
-            }
+        } else if ttl < self.negative_min_ttl {
+            ttl = self.negative_min_ttl;
+        } else if ttl > self.negative_max_ttl {
+            ttl = self.negative_max_ttl;
         }
 
         let valid_until = now + ttl;
@@ -81,16 +86,18 @@ impl DnsCache {
         });
     }
 
-    pub fn get(&mut self, query: &str, now: Instant) -> Option<Option<IpAddr>> {
+    pub fn get(&mut self, query: &str, now: Instant) -> Value {
         if let Some(ipaddr) = self.cache.get_mut(query) {
-            if !ipaddr.is_current(now) {
+            if !ipaddr.is_fresh(now) {
                 self.cache.remove(query);
-                None
+                Value::None
+            } else if let Some(ipaddr) = ipaddr.ipaddr {
+                Value::Some(ipaddr)
             } else {
-                Some(ipaddr.ipaddr)
+                Value::NX
             }
         } else {
-            None
+            Value::None
         }
     }
 }
@@ -120,7 +127,7 @@ mod tests {
         let mut cache = DnsCache::default();
         let ipaddr = "1.1.1.1".parse().unwrap();
         cache.insert("example.com".into(), Some(ipaddr), Duration::from_secs(1), now);
-        assert!(cache.get("example.com", now).is_some());
+        assert_eq!(cache.get("example.com", now), Value::Some(ipaddr));
     }
 
     #[test]
@@ -130,6 +137,6 @@ mod tests {
         let ipaddr = "1.1.1.1".parse().unwrap();
         cache.insert("example.com".into(), Some(ipaddr), Duration::from_secs(1), now);
         let now = now + Duration::from_secs(2);
-        assert!(cache.get("example.com", now).is_none());
+        assert_eq!(cache.get("example.com", now), Value::None);
     }
 }
