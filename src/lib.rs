@@ -39,10 +39,13 @@ use futures::{future, Poll, Stream};
 use tokio::prelude::FutureExt;
 use tokio::runtime::Runtime;
 
+use crate::cache::{DnsCache, Value};
+use std::sync::{Arc, Mutex};
+
 pub use http::Uri;
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::net::{SocketAddr, IpAddr};
+use std::time::{Duration, Instant};
 
 pub mod cache;
 mod connector;
@@ -63,6 +66,7 @@ pub use crate::errors::*;
 #[derive(Debug)]
 pub struct Client<R: DnsResolver> {
     client: hyper::Client<HttpsConnector<Connector<HttpConnector, R>>>,
+    cache: Arc<Mutex<DnsCache>>,
 }
 
 impl<R: DnsResolver + 'static> Client<R> {
@@ -70,7 +74,9 @@ impl<R: DnsResolver + 'static> Client<R> {
     ///
     /// This bypasses `/etc/resolv.conf`.
     pub fn new(resolver: R) -> Client<R> {
-        let https = Connector::new(resolver)
+        let connector = Connector::new(resolver);
+        let cache = connector.cache();
+        let https = connector
             .with_https();
         let client = hyper::Client::builder()
             .keep_alive(false)
@@ -78,6 +84,7 @@ impl<R: DnsResolver + 'static> Client<R> {
 
         Client {
             client,
+            cache,
         }
     }
 
@@ -110,7 +117,9 @@ impl Client<Resolver> {
     /// Create a new client that is locked to a socks5 proxy
     pub fn with_socks5(proxy: SocketAddr) -> Client<Resolver> {
         let resolver = Resolver::empty();
-        let https = Connector::new(resolver)
+        let connector = Connector::new(resolver);
+        let cache = connector.cache();
+        let https = connector
             .with_socks5(proxy)
             .with_https();
         let client = hyper::Client::builder()
@@ -119,6 +128,7 @@ impl Client<Resolver> {
 
         Client {
             client,
+            cache,
         }
     }
 }
@@ -131,8 +141,10 @@ pub trait HttpClient {
 impl<R: DnsResolver + 'static> HttpClient for Client<R> {
     fn request(&self, request: Request<hyper::Body>) -> ResponseFuture {
         let client = self.client.clone();
+        let cache = self.cache.clone();
 
-        info!("sending request to {:?}", request.uri());
+        let uri = request.uri().clone();
+        info!("sending request to {:?}", uri);
         let fut = client.request(request).map_err(Error::from)
             .and_then(|res| {
                 debug!("http response: {:?}", res);
@@ -141,9 +153,24 @@ impl<R: DnsResolver + 'static> HttpClient for Client<R> {
                 (future::ok(parts), body)
             }).map_err(Error::from);
 
-        let reply = fut.and_then(|(parts, body)| {
+        let reply = fut.and_then(move |(parts, body)| {
+            let ipaddr = {
+                if let Some(host) = uri.host() {
+                    let mut cache = cache.lock().unwrap();
+                    if let Value::Some(ipaddr) = cache.get(host, Instant::now()) {
+                        debug!("adding ip address to response: {}", ipaddr);
+                        Some(ipaddr)
+                    } else {
+                        debug!("no ip address found in cache, this is unexpected");
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
             let body = body.into_bytes();
-            let reply = Response::from((parts, body));
+            let reply = Response::build(ipaddr, parts, body);
             info!("got reply {:?}", reply);
             Ok(reply)
         });
@@ -202,14 +229,12 @@ pub struct Response {
     pub status: u16,
     pub headers: HashMap<String, String>,
     pub cookies: Vec<String>,
+    pub ipaddr: Option<IpAddr>,
     pub body: Bytes,
 }
 
-impl From<(Parts, Bytes)> for Response {
-    fn from(x: (Parts, Bytes)) -> Response {
-        let parts = x.0;
-        let body = x.1;
-
+impl Response {
+    fn build(ipaddr: Option<IpAddr>, parts: Parts, body: Bytes) -> Response {
         let cookies = parts
             .headers
             .get_all("set-cookie")
@@ -234,6 +259,7 @@ impl From<(Parts, Bytes)> for Response {
             status: parts.status.as_u16(),
             headers,
             cookies,
+            ipaddr,
             body,
         }
     }

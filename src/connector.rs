@@ -138,6 +138,10 @@ impl<R: DnsResolver> Connector<HttpConnector, R> {
 
         HttpsConnector::from((self, config))
     }
+
+    pub fn cache(&self) -> Arc<Mutex<DnsCache>> {
+        self.cache.clone()
+    }
 }
 
 impl<R> Connect for Connector<HttpConnector, R>

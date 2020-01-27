@@ -45,6 +45,7 @@ impl Default for TtlConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct DnsCache {
     cache: LruCache<String, LruValue>,
     positive_min_ttl: Duration,
