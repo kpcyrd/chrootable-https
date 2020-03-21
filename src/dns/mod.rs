@@ -142,6 +142,14 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    pub fn new(ns: Vec<SocketAddr>) -> Resolver {
+        Resolver {
+            ns,
+            tcp: false,
+            timeout: Some(Duration::from_secs(3)),
+        }
+    }
+
     /// Build a resolver with no nameservers
     pub fn empty() -> Resolver {
         Resolver {
@@ -155,32 +163,33 @@ impl Resolver {
     ///
     /// [cf]: https://www.cloudflare.com/learning/dns/what-is-1.1.1.1/
     pub fn cloudflare() -> Resolver {
-        Resolver {
-            ns: vec!["1.1.1.1:53".parse().unwrap(), "1.0.0.1:53".parse().unwrap()],
-            tcp: false,
-            timeout: Some(Duration::from_secs(3)),
-        }
+        Resolver::new(
+            vec!["1.1.1.1:53".parse().unwrap(), "1.0.0.1:53".parse().unwrap()],
+        )
     }
     
     /// Creates a new resolver using the [Google Public DNS][ggl] service.
     ///
     /// [ggl]: https://developers.google.com/speed/public-dns/
     pub fn google() -> Resolver {
-        Resolver {
-            ns: vec!["8.8.8.8:53".parse().unwrap(), "8.8.4.4:53".parse().unwrap()],
-            tcp: false,
-            timeout: Some(Duration::from_secs(3)),
-        }
+        Resolver::new(
+            vec!["8.8.8.8:53".parse().unwrap(), "8.8.4.4:53".parse().unwrap()],
+        )
     }
 
     /// Creates a new resolver from `/etc/resolv.conf`.
     pub fn from_system() -> Result<Resolver> {
         let ns = system_conf::read_system_conf()?;
-        Ok(Resolver {
-            ns,
-            tcp: false,
-            timeout: Some(Duration::from_secs(3)),
-        })
+        Ok(Resolver::new(ns))
+    }
+
+    /// Creates a new resolver from `/etc/resolv.conf`.
+    pub fn from_system_v4() -> Result<Resolver> {
+        let ns = system_conf::read_system_conf()?
+            .into_iter()
+            .filter(|ns| ns.is_ipv4())
+            .collect();
+        Ok(Resolver::new(ns))
     }
 
     /// Sets a timeout within which each DNS query must complete.

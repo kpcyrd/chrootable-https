@@ -25,7 +25,7 @@ fn main() {
     let client = if let Some(proxy) = args.socks5 {
         Client::with_socks5(proxy)
     } else {
-        let resolver = Resolver::cloudflare();
+        let resolver = Resolver::from_system_v4().expect("Resolver::from_system_v4");
         Client::new(resolver)
     };
 
