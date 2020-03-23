@@ -110,13 +110,15 @@ impl<R: DnsResolver + 'static> Client<R> {
 impl Client<Resolver> {
     /// Create a new client with the system resolver from `/etc/resolv.conf`.
     pub fn with_system_resolver() -> Result<Client<Resolver>> {
-        let resolver = Resolver::from_system()?;
+        let resolver = Resolver::from_system()
+            .context("Failed to load dns configuration")?;
         Ok(Client::new(resolver))
     }
 
     /// Create a new client with the ipv4 system resolver from `/etc/resolv.conf`.
     pub fn with_system_resolver_v4() -> Result<Client<Resolver>> {
-        let resolver = Resolver::from_system_v4()?;
+        let resolver = Resolver::from_system_v4()
+            .context("Failed to load dns configuration")?;
         Ok(Client::new(resolver))
     }
 
