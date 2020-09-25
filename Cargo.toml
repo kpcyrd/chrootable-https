@@ -32,9 +32,6 @@ futures = "0.1"
 ct-logs = "0.6"
 webpki-roots = "0.18"
 
-[target.'cfg(unix)'.dependencies]
-resolv-conf = { version = "0.6.0", features = ["system"] }
-
 [target.'cfg(windows)'.dependencies]
 ipconfig = "0.2"
 

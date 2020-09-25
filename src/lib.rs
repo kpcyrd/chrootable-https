@@ -280,6 +280,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    #[ignore]
     fn verify_200_http() {
         let resolver = Resolver::cloudflare();
 
@@ -292,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn verify_200_https() {
         let resolver = Resolver::cloudflare();
 
@@ -304,6 +306,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn verify_200_https_ipaddr() {
         let resolver = Resolver::cloudflare();
 
@@ -316,6 +319,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn verify_200_https_system_resolver() {
         let client = Client::with_system_resolver().expect("failed to create client");
         let reply = client
@@ -325,6 +329,8 @@ mod tests {
         assert_eq!(reply.status, 200);
     }
 
+    // 2020-09-25: service is broken, returns 404
+    /*
     #[test]
     fn verify_302() {
         let resolver = Resolver::cloudflare();
@@ -336,8 +342,10 @@ mod tests {
             .expect("request failed");
         assert_eq!(reply.status, 302);
     }
+    */
 
     #[test]
+    #[ignore]
     fn verify_timeout() {
         let resolver = Resolver::cloudflare();
         let client = Client::new(resolver);
